@@ -1,4 +1,4 @@
-# ERC-8457: Credit-Matched Liquidity (draft)
+# Credit-Matched Liquidity (draft ERC)
 
 > **Not audited. Never deploy without an external audit.** The contracts in `src/` are a reference for a draft
 > interface, written against mocks. Nobody outside their authors has reviewed them, and they must not hold real funds.
@@ -11,9 +11,10 @@ once it is due. A price set while the stock's market was closed is never used, a
 cannot strand a position: the lender's share goes to a fallback address it names, and the holder's share waits in the
 position token.
 
-**Status: draft, not submitted.** The text is in [`ERCS/erc-8457.md`](ERCS/erc-8457.md). ERC-8457 is the next number
-that was free on 2026-10-20; the ERC editors confirm it, or assign another, when the pull request is opened on
-ethereum/ERCs. Discussion opens on Ethereum Magicians first.
+**Status: draft, not submitted.** The text is in
+[`ERCS/erc-draft_credit_matched_liquidity.md`](ERCS/erc-draft_credit_matched_liquidity.md). Its `eip: 99908` is a
+placeholder: the ERC editors assign the real number when the pull request is opened on ethereum/ERCs. Discussion will
+open on Ethereum Magicians first.
 
 ## Why
 
@@ -41,7 +42,7 @@ implementation reads a reduced session interface that an adapter over it can pro
 
 | Path | What |
 |---|---|
-| `ERCS/erc-8457.md` | The ERC text, in the ethereum/ERCs template |
+| `ERCS/erc-draft_credit_matched_liquidity.md` | The ERC text, in the ethereum/ERCs template |
 | `src/ICreditMatchedLiquidity.sol` | The interface |
 | `src/CreditMatchedLiquidity.sol` | A reference escrow and lender, one lender per contract (not audited; never deploy without an external audit) |
 | `test/CreditMatchedLiquidity.t.sol` | Foundry tests of the reference against the specification, including manipulated pool prices, stale and closed-market prices, blocked transfers, a quote token that charges on transfer, token and feed decimals from 0 to 18, and prices at the bounds |
@@ -62,12 +63,12 @@ CI runs all four on every push (`.github/workflows/ci.yml`).
 
 ## Related drafts
 
-- ERC-8450 Agent Credit Lines: one interface to borrow, repay and default against any lender to agent identities
-  (github.com/priors-agents/ERC-8450). A position here is a secured loan; its opening, closing and unwinding are the
-  same life a credit line's events record.
-- ERC-8454 Liquidity Locks: one interface for any contract that locks pool liquidity
-  (github.com/priors-agents/ERC-8454). An escrowed position here is a lock the holder cannot open, with a way out for
-  its lender.
+- Agent Credit Lines: one interface to borrow, repay and default against any lender to agent identities
+  (github.com/priors-agents/erc-agent-credit-lines). A position here is a secured loan; its opening, closing and
+  unwinding are the same life a credit line's events record.
+- Liquidity Locks: one interface for any contract that locks pool liquidity
+  (github.com/priors-agents/erc-liquidity-locks). An escrowed position here is a lock the holder cannot open, with a way
+  out for its lender.
 
 ## Licence
 

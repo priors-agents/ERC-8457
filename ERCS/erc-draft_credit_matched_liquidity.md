@@ -3,7 +3,7 @@ eip: 99908
 title: Credit-Matched Liquidity
 description: Loans that fund the quote side of an escrowed liquidity position, paid first from its fees and valued by a price feed
 author: Priors contributors (@priors-agents)
-discussions-to: https://ethereum-magicians.org/t/erc-credit-matched-liquidity/0
+discussions-to: https://ethereum-magicians.org/t/erc-tba-credit-matched-liquidity/30039
 status: Draft
 type: Standards Track
 category: ERC

@@ -13,8 +13,8 @@ position token.
 
 **Status: draft, not submitted.** The text is in
 [`ERCS/erc-draft_credit_matched_liquidity.md`](ERCS/erc-draft_credit_matched_liquidity.md). Its `eip: 99908` is a
-placeholder: the ERC editors assign the real number when the pull request is opened on ethereum/ERCs. Discussion will
-open on Ethereum Magicians first.
+placeholder: the ERC editors assign the real number when the pull request is opened on ethereum/ERCs. Discussion:
+[Ethereum Magicians](https://ethereum-magicians.org/t/erc-tba-credit-matched-liquidity/30039).
 
 ## Why
 

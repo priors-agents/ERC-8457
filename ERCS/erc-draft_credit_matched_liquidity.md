@@ -16,12 +16,14 @@ requires: 20, 165, 721
 This proposal defines an interface for a contract that lends an [ERC-20](./eip-20.md) quote token into a
 concentrated-liquidity position that a holder pairs with base tokens it owns. The position, an [ERC-721](./eip-721.md)
 token of a position manager, stays in the contract's escrow: the holder cannot withdraw it. Fees in the quote token pay
-the lender first. The holder closes the position by repaying what it owes and gets the position token back. Anyone may
-unwind the position once its value, taken from the price feed the contract names for the pool and never from the pool's
-own price, no longer covers the loan by the margin fixed at opening, or once it is due. A price set while the base
-token's reference market was closed is never used. The unwind settles at the feed's price without a swap, pays the
-lender's base tokens to a fallback address the lender names, and leaves the holder's part in the position token, so a
-token whose transfer registry blocks an address cannot strand a position.
+the lender first. The holder closes the position by repaying what it owes and gets the position token back. While
+anything is owed, anyone may unwind the position once its value, taken from the price feed the contract names for the
+pool and never from the pool's own price, no longer covers the loan by the margin fixed at opening, or once it is due.
+A price set while the base token was not trading is never used. The unwind settles at the feed's price without a swap,
+pays the lender's base tokens to a fallback address the lender names, and leaves the holder's part in the position
+token, so a token whose transfer registry blocks an address cannot strand a position. When, past the due date, no price
+has come for a delay the lender lists, or when the base token will never trade again, anyone may instead hand the
+position over to the lender without a price.
 
 ## Motivation
 
@@ -62,15 +64,31 @@ interface IPriceFeed {
 }
 ```
 
-- **Session-traded base token**: a base token whose reference market trades in sessions, such as a tokenized stock. Its
-  **market-status source** is the contract from which the escrow learns whether that market is in session, whether the
-  asset is halted, and when the current session opened.
+- **Status source**: for a base token whose reference market trades in sessions or can stop trading, such as a
+  tokenized stock, a contract with the function below, which reports the base token's trading status in that market
+  and since when it holds. A base token traded continuously has no status source.
+
+```solidity
+interface ITradingStatus {
+    enum TradingStatus { Unknown, Trading, SessionBreak, Halted, Terminal }
+    function tradingStatus() external view returns (TradingStatus status, uint64 since);
+}
+```
+
+- **Trading status**: `Trading` while the market is in session and the asset trades, `since` the session opened or
+  trading last resumed; `SessionBreak` while the market is closed between sessions on its schedule, at night, over a
+  weekend or a holiday, or in an intraday break, `since` the break began; `Halted` while trading in the asset, or in
+  its whole market, is stopped outside the schedule with no time set to resume, as in a halt or a suspension, `since`
+  it stopped and through any scheduled break until trading resumes; `Terminal` once the asset will not trade in that
+  market again, as after a delisting, a redemption or the end of the token's program; and `Unknown`, which is zero so
+  that an unset value never reads as `Trading`, when the source cannot tell. `since` is when the status began, not
+  when the source last confirmed it.
 - **Usable price**: the answer of a position's feed (before opening, of the feed `oracleOf(pool)` names) when all of
   these hold:
   1. `answer` is above zero;
   2. `updatedAt` is not zero, not later than the block timestamp, and not older than `maxPriceAge`;
-  3. for a session-traded base token, the market-status source answers, the reference market is in session, the asset
-     is not halted, and `updatedAt` is at or after the time the current session opened;
+  3. if the base token has a status source, the source reports `Trading`, and `updatedAt` is at or after the `since`
+     it reports;
   4. the price it gives, once the decimals of the feed and of both tokens are applied, is above zero and not above the
      largest price the contract accepts.
 - **Value** of a position at a usable price `P`: the base and quote its liquidity holds when the price is `P`, plus the
@@ -84,7 +102,7 @@ A conforming contract MUST implement `ICreditMatchedLiquidity` and MUST implemen
 
 ```solidity
 interface ICreditMatchedLiquidity {
-    enum Status { None, Open, Closed, Unwound }
+    enum Status { None, Open, Closed, Unwound, HandedOver }
 
     struct Position {
         address holder;
@@ -93,12 +111,13 @@ interface ICreditMatchedLiquidity {
         address positionManager;
         uint256 tokenId;
         address priceFeed;
-        address marketStatus;
+        address statusSource;
         uint32 maxPriceAge;
         uint16 unwindBps;
         uint16 gapBps;
         uint64 openedAt;
         uint64 dueAt;
+        uint32 handoverDelay;
         uint256 baseIn;
         uint256 quoteLent;
         uint256 owed;
@@ -109,6 +128,7 @@ interface ICreditMatchedLiquidity {
     event FeesApplied(uint256 indexed positionId, uint256 toLender, uint256 toHolder);
     event PositionClosed(uint256 indexed positionId, uint256 repaid);
     event PositionUnwound(uint256 indexed positionId, uint256 recovered, uint256 shortfall);
+    event PositionHandedOver(uint256 indexed positionId, uint256 recovered, uint256 outstanding);
 
     function quoteToken() external view returns (address);
     function identityRegistry() external view returns (address);
@@ -127,8 +147,8 @@ interface ICreditMatchedLiquidity {
 ### Tokens, pools and prices
 
 - `quoteToken()` MUST return the ERC-20 token lent and repaid, and MUST NOT change. `quoteLent`, `owed`, `toLender`,
-  `toHolder`, `repaid`, `recovered`, `shortfall` and `valueInQuote` are in its base units; `baseIn` is in the base
-  token's.
+  `toHolder`, `repaid`, `recovered`, `shortfall`, `outstanding` and `valueInQuote` are in its base units; `baseIn` is
+  in the base token's.
 - `identityRegistry()` MUST return the ERC-721 contract the `agentId` values refer to, such as the Identity Registry of
   [ERC-8004](./eip-8004.md), or the zero address, and MUST NOT change.
 - `oracleOf(pool)` MUST return the price feed the contract uses for positions opened from now on in `pool`, and the
@@ -137,8 +157,8 @@ interface ICreditMatchedLiquidity {
   `quoteLimit`, `health`, or what an unwind pays to whom. The pool's price decides only the proportions in which a mint
   takes the two tokens and an unwind withdraws them.
 - The contract MUST read `decimals()` from the feed, and the decimals of both tokens, rather than assume them.
-- For a session-traded base token, the contract MUST read the reference market's state from a market-status source,
-  and MUST treat a source that reverts as a closed market.
+- For a base token with a status source, the contract MUST read the trading status from it, and MUST treat a source
+  that reverts, returns no answer, or answers with a value outside `TradingStatus`, as reporting `Unknown`.
 - The contract MUST define the largest price it accepts, and MUST NOT support a pool whose feed, when the pool is added,
   gives a price above it or not above zero. It MUST compute every price conversion, valuation, threshold comparison and
   settlement amount in full precision (a multiplication kept in 512 bits before its division, or equivalent), so that
@@ -164,24 +184,26 @@ interface ICreditMatchedLiquidity {
     Quote the position did not take stays with the lender.
   - MUST record the position with `holder` set to `msg.sender`; `baseIn` and `quoteLent` set to the amounts the position
     took; `owed` set to `quoteLent` plus the lender's charge, if any; `priceFeed` set to `oracleOf(pool)`;
-    `marketStatus` set to the market-status source, or the zero address for a base token traded continuously; the
-    lender's `maxPriceAge`, `unwindBps` and `gapBps`; `openedAt` set to the block timestamp; `dueAt` set to the due
-    time, or `0` for none; and `status` set to `Open`. It MUST give the position a `positionId` that is not zero and is
-    never reused, emit `PositionOpened`, and return the id.
+    `statusSource` set to the base token's status source, or the zero address for a base token traded continuously;
+    the lender's `maxPriceAge`, `unwindBps` and `gapBps`; `openedAt` set to the block timestamp; `dueAt` set to the due
+    time, or `0` for none; `handoverDelay` set to the hand-over delay the lender lists; and `status` set to `Open`. It
+    MUST give the position a `positionId` that is not zero and is never reused, emit `PositionOpened`, and return the
+    id.
   - MUST revert if the new position would be unwindable (as `health` defines it) at its usable price lowered by
     `gapBps / 10000`.
 - `unwindBps` MUST be greater than `10000` and `gapBps` less than `10000`.
-- For a session-traded base token, the lender SHOULD set `gapBps` to at least the largest move it expects between one
-  session's last price and the next session's first, across a weekend or a holiday and through news, and SHOULD choose
-  `unwindBps` and the ratio behind `quoteLimit` so that a position at its unwind line is still worth more than it owes
-  after that move.
+- For a base token traded in sessions, the lender SHOULD set `gapBps` to at least the largest move it expects between
+  one session's last price and the next session's first, across a weekend or a holiday and through news, and SHOULD
+  choose `unwindBps` and the ratio behind `quoteLimit` so that a position at its unwind line is still worth more than
+  it owes after that move.
+- The lender SHOULD list a `handoverDelay` of at least 14 days (1,209,600 seconds).
 
 ### Escrow and terms
 
 - While a position is `Open`, the contract MUST hold its position token and MUST NOT withdraw liquidity from it,
   collect from it or transfer it, except as `applyFees`, `close` and `unwind` define.
-- A position's `priceFeed`, `marketStatus`, `maxPriceAge`, `unwindBps`, `gapBps` and `dueAt` MUST NOT change. Its
-  `owed` MUST NOT increase after it is opened.
+- A position's `priceFeed`, `statusSource`, `maxPriceAge`, `unwindBps`, `gapBps`, `dueAt` and `handoverDelay` MUST NOT
+  change. Its `owed` MUST NOT increase after it is opened.
 - `positionOf(positionId)` MUST return the position as recorded, with its current `owed` and `status`, and a
   zero-valued record with status `None` for an id never issued.
 
@@ -189,7 +211,9 @@ interface ICreditMatchedLiquidity {
 
 - For an `Open` position, `health(positionId)` MUST revert when the position's price is not usable. Otherwise it MUST
   return the position's value at that price as `valueInQuote`, its `owed`, and `unwindable` set to `true` exactly when
-  `dueAt` is not zero and the block timestamp is at or after it, or when `valueInQuote * 10000 < owed * unwindBps`.
+  `owed` is not zero and either `dueAt` is not zero and the block timestamp is at or after it, or
+  `valueInQuote * 10000 < owed * unwindBps`. A position with nothing owed is never unwindable, at its due date or after
+  it.
 - For a position that is not `Open`, `health` MUST return zeros and `false`.
 
 ### Fees
@@ -211,10 +235,14 @@ interface ICreditMatchedLiquidity {
 
 ### Unwinding
 
-- `unwind(positionId)` MUST be callable by any account. It MUST revert unless the position is `Open` and `health` reports
-  it unwindable, so it reverts when the price is not usable, including after `dueAt`.
-- It MUST remove all of the position's liquidity, then settle everything owed to the position token, fees included, at
-  the price `P` that `health` used:
+- `unwind(positionId)` MUST be callable by any account. It MUST revert unless the position is `Open` and its `owed` is
+  not zero: a position with nothing owed is never unwound or handed over, and only its holder's `close` ends it. When
+  the position's price is usable, `unwind` MUST revert unless `health` reports the position unwindable, and then
+  unwinds it as below. When the price is not usable, it MUST revert unless a hand-over is due, and then hands the
+  position over (see Hand-over); so it reverts when the price is not usable, including after `dueAt`, until a
+  hand-over is due.
+- To unwind, it MUST remove all of the position's liquidity, then settle everything owed to the position token, fees
+  included, at the price `P` that `health` used:
   1. the lender receives the quote, up to `owed`;
   2. if that does not cover `owed`, the lender receives the base worth the rest at `P`, rounded up, up to all of the
      base. The position manager MUST pay this base straight to `lenderFallback()`;
@@ -228,6 +256,28 @@ interface ICreditMatchedLiquidity {
   `recovered`.
 - `lenderFallback()` MUST NOT return the zero address. The lender sets it, by means outside this interface, to an address
   it expects the base token's transfer registry to accept.
+
+### Hand-over
+
+- A hand-over is due for an `Open` position whose `owed` is not zero and whose price is not usable when:
+  1. its status source reports `Terminal`, whatever `dueAt`; or
+  2. `dueAt` is not zero, the block timestamp is at or after `dueAt + handoverDelay`, and no price has come for the
+     hand-over delay: the status source reports `Halted` with a `since` more than `handoverDelay` before the block
+     timestamp; or the feed is silent while the status source reports `Trading` or `Unknown`, or while the base token
+     has no status source.
+- The feed is **silent** when its answer would not be a usable price even with `handoverDelay` in place of
+  `maxPriceAge` and without condition 3 of a usable price, that is, when it has given no answer the contract could
+  price within the last `handoverDelay`. A feed that answered within that time is late, not silent: the contract waits
+  for it.
+- An `Unknown` status, including one read from a source that reverts, returns no answer or answers outside
+  `TradingStatus`, makes a hand-over due only together with a silent feed, whatever `since` it reports: a source that
+  fails, for one call or for longer, never stands in for a price missing for the whole delay.
+- A `SessionBreak` never makes a hand-over due, however long it lasts: the contract waits for the reopening price.
+- To hand a position over, `unwind` MUST remove all of the position's liquidity, collect the quote owed to the position
+  token, up to `owed`, for the lender, and transfer the position token, with everything still owed to it, to
+  `lenderFallback()`. No amount it moves or reports may depend on a price, and it MUST NOT transfer the base token. It
+  MUST set `owed` to zero and the status to `HandedOver`, and emit `PositionHandedOver`, not `PositionUnwound`, with
+  `recovered` set to the quote the lender received, at most `owed`, and `outstanding` set to `owed` minus `recovered`.
 
 ## Rationale
 
@@ -245,9 +295,25 @@ interface ICreditMatchedLiquidity {
 - **Prices from a closed market do not count.** A feed for a stock keeps the last session's answer through a weekend,
   and may refresh `updatedAt` without a new price, so the age of an answer cannot show that it still holds. Opening at
   Friday's price lends against a value Monday may not confirm; unwinding at it gives the lender base at a price nobody
-  can trade at. The contract therefore asks a market-status source, and uses only an answer set after the current
-  session opened. A halt is treated as a closed market. Requiring the answer to postdate the session's opening also
+  can trade at. The contract therefore asks a status source, and uses only an answer set after the current session
+  opened or trading resumed. A halt gives no price either. Requiring the answer to postdate the session's opening also
   covers the minutes after a reopening, before the feed has caught up with the gap.
+- **A trading status, not a session flag.** A flag that only says whether the market is open treats a halt as a
+  weekend. A weekend is bounded and `gapBps` can be sized for it; a halt is not, and halts, delistings and redemptions
+  are when the reopening price gaps the most, if it comes at all. The status therefore tells apart a session break,
+  after which a price comes back, a halt, which may last, and a terminal state, after which no price will come. None
+  of them gives a price; they differ past the due date: a break is waited out, a halt is waited out for the hand-over
+  delay, and a terminal state is handed over at once, due or not, since waiting cannot bring a price. `since` dates a
+  price against the session it belongs to and times a halt. `Unknown` is zero so that a source that was never set
+  reads as unknown, not as trading, and a source that cannot answer reads the same, so that it lets no price through.
+  An unknown status says nothing about how long the price has been missing, so it counts toward a hand-over only with
+  a feed silent for the whole delay: a source that fails for a moment cannot cost the holder its part.
+- **A small status interface of its own.** Asset-status interfaces drafted for tokenized assets report more than the
+  escrow needs: the program's lifecycle, the session and any interruption separately, the state of the valuation
+  source. `ITradingStatus` reduces them to the one answer the escrow acts on, and an adapter can derive it from such an
+  interface, a feed's market-status report or an issuer's pause flag. Its function is named `tradingStatus()` so that
+  its selector differs from that of an `assetStatus()` view drafted for tokenized assets, whose answer has another
+  layout and would otherwise decode as a wrong status.
 - **Closing and fees need no price.** `owed` is in the quote token and `close` hands back the position token, so neither
   depends on a price that may no longer hold, and a holder can repay over a weekend. Only opening and unwinding wait
   for the market.
@@ -269,10 +335,40 @@ interface ICreditMatchedLiquidity {
   token when the base cannot leave the pool, go to an address the lender keeps acceptable to the base token's registry.
   The holder's part never needs a transfer of the base: it waits in the position token until the holder's address is
   allowed to collect it.
+- **A hand-over when no price comes.** Without one, a feed that dies after the due date leaves the holder a free option:
+  close if the asset recovers, walk away if it does not, while the lender waits on a feed that may never return. Only
+  the base leg of an unwind needs a price; the quote leg does not. So once a hand-over is due, `unwind` collects the
+  quote up to `owed` and gives the lender the position token for the rest. Without a price the base cannot be split
+  between the lender and the holder, so the token goes to the lender whole; the holder had the term and the delay to
+  close, and closing needs no price. The pool's price decides only how much of what goes to the lender arrives as
+  quote, so moving it before a hand-over gains nobody anything.
+- **A silent feed, not a late one.** A hand-over gives the lender more than an unwind at a price would, the holder's
+  part of the position, so a lender gains from triggering one, and the rule must not hand over on a price that is
+  only late. A session that has just opened has no price yet, and a feed can fall behind `maxPriceAge` for a while.
+  The hand-over therefore waits until the feed has given no answer the contract could price for the whole delay, or a
+  halt has lasted it, which a live feed, or a halt that ends with trading resuming, does not reach; an unknown status
+  waits for the silent feed too. A session break never counts, however long a source reports it: breaks are scheduled
+  and end with a price.
+- **The hand-over delay is the lender's, with a floor.** The delay is a term like `gapBps`: the lender lists it and the
+  position records it, so a holder knows at opening how long past the due date it can still close, and lenders can
+  compete on it; one delay fixed in this proposal would not fit every base token and every lender. It SHOULD still be
+  at least 14 days, for three reasons. It is how long a feed must be silent to count as dead, and some stock exchanges
+  close on schedule for up to about ten days, around the lunar new year, so a shorter delay would let a feed that does
+  not answer while its market is closed look dead at the reopening, minutes before the session's first price. It is
+  how long a halt must last before the position is handed over, and a trading suspension by the United States
+  securities regulator lasts up to ten business days, about 14 calendar days, while most halts end within the day.
+  And it is the holder's last time to close after the due date, which two weeks give across a holiday. The lender
+  waits at most the delay past the later of the due date and the moment the price stopped coming, and a lender that
+  wants to wait less can lend for a shorter term.
+- **Nothing owed, nothing to unwind.** Fees can repay a position in full before it is due. A due date ends the lender's
+  exposure, and with nothing owed there is none, so such a position is never unwindable and never handed over; its
+  holder closes it, paying nothing, and gets the position token back as `Closed`. Otherwise anyone could pull the
+  holder's liquidity at the due date, and a reader of an identity's credit history would see an unwind for a loan
+  repaid in full.
 - **A due date, a charge fixed at opening, terms that do not move.** A due date stops a position from holding the
   lender's quote for ever. Folding the charge into `owed` at opening lets the holder know the most it will owe. Fixing
-  the feed, the market-status source, the price age and the unwind line per position stops a lender from unwinding a
-  position that was healthy under the terms it was opened on.
+  the feed, the status source, the price age, the unwind line and the hand-over delay per position stops a lender from
+  unwinding, or taking over, a position that was healthy under the terms it was opened on.
 - **The identity is the holder's.** `agentId` lets readers count a position's opening, closing and unwinding as credit
   events of an identity, such as an ERC-8004 agent. Checking ownership at opening stops anyone from attributing a
   position, and its shortfall, to an identity that is not theirs.
@@ -291,9 +387,10 @@ part of an unwind can wait for the holder.
 
 A conforming implementation passes these cases. Each starts from a base token of 18 decimals that trades in sessions and
 is priced 250 quote by a feed of 8 decimals, a quote token of 6 decimals, and a lender that lends up to the value of the
-base brought, unwinds below an `unwindBps` of 11000, requires a `gapBps` of 2000, charges 1% for 30 days, and accepts
-prices at most a day old. The holder brings 100 base and borrows 25,000 quote. The positions in the tests are full-range,
-so this one is worth 50,000 at 250, and 50,000 times the square root of `P / 250` at a price `P`.
+base brought, unwinds below an `unwindBps` of 11000, requires a `gapBps` of 2000, charges 1% for 30 days, hands over
+14 days past the due date, and accepts prices at most a day old. The holder brings 100 base and borrows 25,000 quote.
+The positions in the tests are full-range, so this one is worth 50,000 at 250, and 50,000 times the square root of
+`P / 250` at a price `P`.
 
 - `quoteLimit` for 100 base is 25,000 and does not move with the pool's own price. An open of 25,000 takes 100 base and
   25,000 quote, records 25,250 owed, keeps the position token, emits `PositionOpened` and returns id 1; an open of one
@@ -315,13 +412,32 @@ so this one is worth 50,000 at 250, and 50,000 times the square root of `P / 250
 - An answer that is zero, negative, from the future or more than a day old, or a feed of 19 decimals, makes `health` and
   `unwind` revert and `quoteLimit` return 0. One second before `dueAt` a healthy position cannot be unwound; at `dueAt`
   it can.
+- With quote fees that repay all that is owed, the position is not unwindable at `dueAt`, and an unwind by anyone
+  reverts at `dueAt`, past the hand-over time with the feed silent, and with a terminal status. The holder's close
+  takes nothing, emits `PositionClosed` with 0, and returns the position token as `Closed`.
 - With the base token blocking the escrow and the holder, the unwind at 70 still pays 171.732 base to the fallback
   address. With the base token blocking the pool, it pays the quote, gives the position token to the fallback address
   and reports the base it could not pay as shortfall.
-- While the market is closed, a fresh answer of 70 is not used, even after `dueAt`: `health` and `unwind` revert,
-  `quoteLimit` is 0 and `open` reverts, while `applyFees` and `close` succeed. After the market reopens, an answer
-  refreshed a minute before the opening is not used, and the first answer of the session, 70, allows the unwind. A
-  market-status source that reverts counts as a closed market; a pool whose base trades continuously needs none.
+- On a session break, a fresh answer of 70 is not used, even after `dueAt`: `health` and `unwind` revert, `quoteLimit`
+  is 0 and `open` reverts, while `applyFees` and `close` succeed. After the market reopens, an answer refreshed a
+  minute before the opening is not used, and the first answer of the session, 70, allows the unwind. A halt gives no
+  price either. A status source that reverts, has no code or answers outside `TradingStatus` gives no price; a pool
+  whose base trades continuously needs no status source.
+- With the feed silent since the opening, an unwind one second before `dueAt + handoverDelay` reverts. At that time an
+  unwind by a stranger hands the position over: the lender receives 25,000 quote, and the position token with the 100
+  base still in it at its fallback address; no base token moves; the status is `HandedOver`; and `PositionHandedOver`
+  reports 25,000 recovered and 250 outstanding.
+- At the hand-over time, a feed whose last answer is two days old is late, not silent, and the unwind reverts until
+  that answer is more than 14 days old; a fresh answer of zero counts as silence and hands the position over.
+- A session break that runs past the hand-over time, even one reported for weeks with the feed silent, never hands
+  over; once the market reopens, an answer from before the break is late, not silent, and the first answer of the
+  session, 70, unwinds the position at a price, leaving the holder its part. The same stop reported as a halt hands
+  over. A halt that began an hour before the hand-over time hands over only once it has lasted more than 14 days.
+- A terminal status hands a healthy position over at once, a month before `dueAt`, while the feed still answers and
+  the base token blocks every transfer. A status source that reverts or answers outside `TradingStatus`, once or for
+  longer, hands nothing over past `dueAt + handoverDelay` while the feed answers; once the source answers again, the
+  overdue position is unwound at the feed's 250 and the holder keeps its part. With the source failing and the feed
+  silent for exactly 14 days the unwind reverts, and one second later it hands the position over.
 - With a quote token that burns 1% of every transfer, a close that would deliver 24,997.5 of the 25,250 owed reverts;
   quote fees of 300 pay the lender the 297 that arrive and reduce `owed` by 297; and the unwind at 70 takes base for what
   is owed minus the quote that arrived.
@@ -335,12 +451,14 @@ so this one is worth 50,000 at 250, and 50,000 times the square root of `P / 250
 ## Reference Implementation
 
 `CreditMatchedLiquidity` accompanies this proposal with its tests and mocks. It has one lender: its own quote balance is
-what it lends, and the lender lists each pool with a price feed, a market-status source for a session-traded base, the
-ratio behind `quoteLimit`, `unwindBps`, `gapBps`, a charge, a term and `maxPriceAge`. It talks to a v3-style position
-manager through a reduced interface whose `amountsAt` returns what a position holds at a given price; against a Uniswap
-v3 manager an implementation computes the same with that protocol's tick and liquidity math. It reads the market session
-through a reduced interface that an adapter can derive from a status interface on the token, a feed's market-status
-report or an issuer's pause flag. It accepts prices up to 1e48 quote units per 1e18 base units, which keeps every
+what it lends, and the lender lists each pool with a price feed, a status source for a base traded in sessions, the
+ratio behind `quoteLimit`, `unwindBps`, `gapBps`, a charge, a term, a hand-over delay, which it refuses below 14 days,
+and `maxPriceAge`. It talks to a v3-style position manager through a reduced interface whose `amountsAt` returns what
+a position holds at a given price; against a Uniswap v3 manager an implementation computes the same with that
+protocol's tick and liquidity math. It reads the trading status through `ITradingStatus`, which an adapter can derive
+from a status interface on the token, a feed's market-status report or an issuer's pause flag, with a low-level call
+whose answer it checks, so that a source that reverts, has no code or answers outside `TradingStatus` reads as
+`Unknown` and makes no call revert. It accepts prices up to 1e48 quote units per 1e18 base units, which keeps every
 amount in range for token amounts up to 2^128, computes with a 512-bit multiply-then-divide, and measures every
 movement of the quote token by balance. It is not audited and must never be deployed without an external audit.
 
@@ -351,16 +469,48 @@ movement of the quote token by balance. It is not audited and must never be depl
 - **Oracle manipulation and staleness.** Everything that protects the lender rests on the feed. A feed that can be moved,
   because its market is thin, it has one reporter, or someone in the loan controls it, can be used to unwind healthy
   positions or to open against a value that is not there. Lenders SHOULD use feeds aggregated from several sources, with
-  a heartbeat shorter than `maxPriceAge`; holders SHOULD read a position's `priceFeed` and `marketStatus` before opening.
-  A feed that stops updating stops opening and unwinding: the position then waits for the feed or for the holder to
-  close. On rollups a halted sequencer delays feed updates, and implementations there SHOULD also check the sequencer's
-  uptime. Decimals are read, never assumed, and implausibly large answers are rejected.
+  a heartbeat shorter than `maxPriceAge`; holders SHOULD read a position's `priceFeed`, `statusSource` and
+  `handoverDelay` before opening. A feed that stops updating stops opening and unwinding: the position then waits for
+  the feed or for the holder to close, until the feed has been silent for the hand-over delay past the due date and
+  the position is handed over. On rollups a halted sequencer delays feed updates, and implementations there SHOULD also
+  check the sequencer's uptime. Decimals are read, never assumed, and implausibly large answers are rejected.
 - **Market closures and gaps.** No price exists while a stock's market is closed, and the first price after it reopens
   can differ from the last by more than `gapBps`. A position can then be worth less than it owes when it first becomes
   unwindable, and the lender takes the shortfall; `gapBps` and `unwindBps` are its only protection, since there is no
-  price in a closed market at which an unwind could do better. The market-status source is trusted like the feed: a
-  source that reports a closed market as open lets a stale price through, and one that never reports it open stops
-  every unwind.
+  price in a closed market at which an unwind could do better. A halt, a delisting or a redemption can gap further, or
+  end with no price at all; past the hand-over delay, or at once for a terminal status, the lender then takes the
+  position without a price.
+- **The hand-over and the holder.** A hand-over gives the lender the whole position token: the holder's part of the
+  base, and any quote beyond `owed`, go with it, and whatever the lender returns of it is settled outside this
+  interface. A holder that wants to keep its part has to close before `dueAt + handoverDelay`; closing needs no price,
+  so no outage or halt stops it. A terminal status hands a position over at once, before its due date too, so holders
+  of a base token that can be delisted or redeemed SHOULD watch its status and keep the quote to close at hand.
+- **A short hand-over delay.** The delay is the holder's last time to close after the due date, and how long a feed
+  must be silent, or a halt last, before the lender takes the whole position without a price. A lender that lists a
+  delay of hours can take positions over an outage or a halt that would have ended in an unwind at a price, in which
+  the holder keeps its part, and a lender that runs the feed, or can hold back its updates, can arrange such an outage.
+  A delay shorter than the longest scheduled closure of the base token's market lets a feed that does not answer while
+  the market is closed look silent at the reopening, before the session's first price, when anyone, the lender's
+  keeper first, can hand the position over. Holders SHOULD NOT open a position whose `handoverDelay` is below 14 days.
+- **A wrong or malicious status source.** The status source is trusted like the feed, and one the lender controls is
+  worse than a feed it controls: by reporting `Terminal` it hands every open position over at once, due or not,
+  holder's part included. Holders SHOULD open only against a status source the lender cannot write, such as the token
+  issuer's own status or an adapter over it. A source that reports `Trading` during a halt or a break lets a stale
+  price through. One that reports a session break for ever stops every unwind and every hand-over, and the lender
+  waits on it as on a feed that never returns. One that wrongly reports `Halted` can hand over only a position already
+  past its due date and delay, and only once the halt it reports has lasted the delay. A source that reverts, has no
+  code or answers outside `TradingStatus` reads as `Unknown`, and so does one that reports it: it lets no price
+  through, and it hands a position over only from `dueAt + handoverDelay` and only when the feed has also been silent
+  for the whole delay, the same bar as a silent feed alone, so a source that fails for one call hands nothing over. A
+  source that stays unknown while the feed keeps answering stops every unwind and every hand-over, like one that
+  reports a session break for ever.
+- **Telling a hand-over from an unwind.** A hand-over emits `PositionHandedOver` and leaves the status `HandedOver`; an
+  unwind emits `PositionUnwound` and leaves `Unwound`, and neither emits the other's event. `shortfall` in an unwind is
+  a loss valued at the feed's price. `outstanding` in a hand-over is not valued: it is what the quote did not cover,
+  and the lender holds the position token against it, which may be worth more or less. A reader that builds a credit
+  history SHOULD NOT count `outstanding` as a loss. A hand-over before `dueAt + handoverDelay` can only come from a
+  terminal status of the base token, not from the holder; one at or after that time means the holder had not repaid by
+  then.
 - **Pool-price manipulation.** Lenders that valued pool shares from the pool's own reserves have been drained by flash
   loans that moved those reserves within one transaction, the Warp Finance exploit of 2020 being the best known. This
   interface never values a position from its pool. The pool's price still sets the proportions of a mint: a holder whose
@@ -375,8 +525,9 @@ movement of the quote token by balance. It is not audited and must never be depl
   pays the lender first, so fees cannot move value out of the position. Charges and the lender's base round up, values
   round down.
 - **Transfer-blocked tokens.** A tokenized stock's registry can block any address. No base token passes through the
-  contract at closing or unwinding: the lender's base goes from the position manager to `lenderFallback()`, and the
-  holder's part stays owed to the position token. If the registry blocks the pool or the position manager, no base can
+  contract at closing, unwinding or a hand-over: at an unwind the lender's base goes from the position manager to
+  `lenderFallback()` and the holder's part stays owed to the position token, and at a hand-over all of the base stays
+  owed to the position token the lender receives. If the registry blocks the pool or the position manager, no base can
   leave it; the unwind then pays the quote, gives the position token, with all of its base, to the lender's fallback
   address and reports the base it could not pay as shortfall. The holder's part of that base is then held by the lender,
   outside this interface. A quote token that blocks the contract or the holder can stop `applyFees` and `close`.
@@ -393,7 +544,7 @@ movement of the quote token by balance. It is not audited and must never be depl
   apply fees first, which is allowed. Anyone may unwind in the block that makes a position unwindable, but since the
   unwind pays at the feed's price, nobody profits at the holder's expense. An implementation that rewards the caller
   creates a race; it SHOULD pay the reward from the lender's share and cap it.
-- **Re-entrancy.** The position manager, both tokens, the feed and the market-status source are external contracts.
+- **Re-entrancy.** The position manager, both tokens, the feed and the status source are external contracts.
   Implementations SHOULD guard `open`, `applyFees`, `close` and `unwind` against re-entry.
 - **Identity.** `agentId` is checked against the registry at opening. A reader that counts positions as credit events
   of an identity still trusts the contract to have checked it.

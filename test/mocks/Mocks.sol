@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 pragma solidity ^0.8.20;
 
+import {ITradingStatus} from "../../src/CreditMatchedLiquidity.sol";
+
 /// @notice An ERC-20 with a public mint and settable decimals. With `setBlocked` it acts as a token with a transfer
 ///         registry: any transfer from or to a blocked address reverts, as tokenized stocks can do. With `setFeeBps` it
 ///         charges a fee on every transfer, so the recipient gets less than the amount sent.
@@ -80,31 +82,38 @@ contract MockPriceFeed {
     }
 }
 
-/// @notice The session of a stock's reference market: tests open and close it, as a weekend or a halt would, and can
-///         make it fail to answer.
+/// @notice The trading status of a stock in its reference market: tests move it between trading, a session break, a
+///         halt and a terminal state, as a weekend, a halt or a delisting would, make it fail to answer, or make it
+///         answer a value outside the enumeration. It starts trading.
 ///         Not audited: a test double, never deploy it, and never deploy anything here without an external audit.
 /// @custom:security Not audited. Never deploy without an external audit.
-contract MockMarketSession {
-    bool public isOpen = true;
-    uint64 public openedAt;
+contract MockTradingStatus {
+    uint256 public status = uint256(ITradingStatus.TradingStatus.Trading);
+    uint64 public since;
     bool public down;
 
-    constructor(uint64 openedAt_) {
-        openedAt = openedAt_;
+    constructor(uint64 since_) {
+        since = since_;
     }
 
-    function set(bool open_, uint64 openedAt_) external {
-        isOpen = open_;
-        openedAt = openedAt_;
+    function set(ITradingStatus.TradingStatus status_, uint64 since_) external {
+        status = uint256(status_);
+        since = since_;
+    }
+
+    /// @notice Any status word, including one outside the enumeration.
+    function setRaw(uint256 status_) external {
+        status = status_;
     }
 
     function setDown(bool down_) external {
         down = down_;
     }
 
-    function marketSession() external view returns (bool, uint64) {
+    /// @dev Returns the status as a raw word, which the ABI encodes as it encodes the enumeration.
+    function tradingStatus() external view returns (uint256, uint64) {
         require(!down, "down");
-        return (isOpen, openedAt);
+        return (status, since);
     }
 }
 

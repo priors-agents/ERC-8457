@@ -5,8 +5,9 @@ pragma solidity ^0.8.20;
 /// @notice A lender supplies the quote side of a concentrated-liquidity position that a holder pairs with base tokens it
 ///         owns. The position stays in escrow; quote fees pay the lender first; the holder closes by repaying; anyone
 ///         unwinds it once the price feed `oracleOf(pool)` names, never the pool's own price, says it no longer covers
-///         the loan. A price set while the base's reference market was closed is never used. Not audited: never deploy
-///         without an external audit.
+///         the loan. A price set while the base's reference market was closed is never used. When no price comes for
+///         the hand-over delay past the due date, or the base will never trade again, anyone hands the position over to
+///         the lender without a price. Not audited: never deploy without an external audit.
 /// @dev The ERC-165 identifier is `type(ICreditMatchedLiquidity).interfaceId`.
 /// @custom:security Not audited. Never deploy without an external audit.
 interface ICreditMatchedLiquidity {
@@ -14,7 +15,8 @@ interface ICreditMatchedLiquidity {
         None,
         Open,
         Closed,
-        Unwound
+        Unwound,
+        HandedOver
     }
 
     struct Position {
@@ -24,12 +26,13 @@ interface ICreditMatchedLiquidity {
         address positionManager; // the ERC-721 contract of the position token
         uint256 tokenId; // the position token, held by this contract while open
         address priceFeed; // the feed of `oracleOf(pool)` at open
-        address marketStatus; // where the base's reference market session is read; 0 if it trades continuously
+        address statusSource; // where the base's trading status is read (ITradingStatus); 0 if it trades continuously
         uint32 maxPriceAge; // seconds after which the feed's answer is not used
         uint16 unwindBps; // unwindable when value * 10000 < owed * unwindBps
         uint16 gapBps; // the price fall a new position had to survive without becoming unwindable
         uint64 openedAt;
         uint64 dueAt; // unwindable from this time on; 0 for no due date
+        uint32 handoverDelay; // seconds past dueAt after which a position without a price is handed over
         uint256 baseIn; // base the position took
         uint256 quoteLent; // quote the position took
         uint256 owed; // quote that `close` takes now
@@ -47,6 +50,7 @@ interface ICreditMatchedLiquidity {
     event FeesApplied(uint256 indexed positionId, uint256 toLender, uint256 toHolder);
     event PositionClosed(uint256 indexed positionId, uint256 repaid);
     event PositionUnwound(uint256 indexed positionId, uint256 recovered, uint256 shortfall);
+    event PositionHandedOver(uint256 indexed positionId, uint256 recovered, uint256 outstanding);
 
     /// @notice The ERC-20 token lent and repaid. Never changes.
     function quoteToken() external view returns (address);
@@ -87,5 +91,7 @@ interface ICreditMatchedLiquidity {
     function close(uint256 positionId) external;
 
     /// @notice Withdraws the position and settles it at the feed's price, the lender first. Anyone, once unwindable.
+    ///         Without a usable price, once a hand-over is due, it gives the lender the quote, up to what is owed, and
+    ///         the position token. Never for a position with nothing owed.
     function unwind(uint256 positionId) external;
 }

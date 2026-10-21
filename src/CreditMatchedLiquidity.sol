@@ -25,13 +25,24 @@ interface IPriceFeed {
         returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
 }
 
-/// @notice The session of a base token's reference market, as the reference reads it: `open` is true only while the
-///         market is in its regular session and the asset is not halted, and `openedAt` is when that session began. An
-///         adapter can derive it from an asset status interface on the token, a feed's market-status report or an
-///         issuer's pause flag. Not audited: never deploy without an external audit.
+/// @notice The trading status of a base token in its reference market, and since when it holds. `Trading`: in session
+///         and trading, since the session opened or trading resumed. `SessionBreak`: closed between sessions on the
+///         market's schedule, since the break began. `Halted`: stopped outside the schedule with no set time to resume,
+///         reported across scheduled breaks until trading resumes, since the halt began. `Terminal`: it will not trade
+///         there again, as after a delisting or a redemption. `Unknown` is zero, so that an unset source never reads as
+///         trading. An adapter can derive it from an asset status interface on the token, a feed's market-status report
+///         or an issuer's pause flag. Not audited: never deploy without an external audit.
 /// @custom:security Not audited. Never deploy without an external audit.
-interface IMarketSession {
-    function marketSession() external view returns (bool open, uint64 openedAt);
+interface ITradingStatus {
+    enum TradingStatus {
+        Unknown,
+        Trading,
+        SessionBreak,
+        Halted,
+        Terminal
+    }
+
+    function tradingStatus() external view returns (TradingStatus status, uint64 since);
 }
 
 /// @notice A v3-style position manager reduced to what the reference needs, with amounts named base and quote rather
@@ -76,14 +87,17 @@ interface IERC165 {
 
 /// @title CreditMatchedLiquidity
 /// @notice Reference implementation of the Credit-Matched Liquidity draft. One lender per contract: its quote balance
-///         is what it lends. The lender lists each pool with a price feed, a market-session source for a base token
+///         is what it lends. The lender lists each pool with a price feed, a trading-status source for a base token
 ///         traded in sessions, and terms; a position's owed amount is the quote it took plus a charge fixed at open,
-///         and never grows. A price set before the current session opened, or read while the market is closed or the
-///         asset halted, is not used. Fees in the quote token pay the lender first; fees in the base token stay in the
-///         position. Unwinding settles at the feed's price and never sends the base token through this contract, so a
-///         transfer registry that blocks it cannot strand a position. Prices are bounded by `MAX_PRICE` and every
-///         product of a price and an amount is computed in 512 bits; every movement of the quote token is counted by
-///         the balance that changed, not the amount requested.
+///         and never grows. A price set before the current session opened, or read while the base is not trading, is
+///         not used. Fees in the quote token pay the lender first; fees in the base token stay in the position.
+///         Unwinding settles at the feed's price and never sends the base token through this contract, so a transfer
+///         registry that blocks it cannot strand a position. When no price has come for the hand-over delay past the
+///         due date, or the base will never trade again, the position is handed over without a price: the lender takes
+///         the quote, up to what is owed, and the position token. A position with nothing owed is never unwound or
+///         handed over. Prices are bounded by `MAX_PRICE` and every product of a price and an amount is computed in
+///         512 bits; every movement of the quote token is counted by the balance that changed, not the amount
+///         requested.
 /// @dev Not audited. A reference for the interface, written against mocks. Never deploy without an external audit.
 /// @custom:security Not audited. Never deploy without an external audit.
 contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
@@ -91,13 +105,14 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
     struct PoolTerms {
         address base; // the pool's other token; fixed once listed
         address priceFeed; // prices one whole base token in whole quote tokens
-        address marketStatus; // IMarketSession for a base traded in sessions; 0 for one traded continuously
+        address statusSource; // ITradingStatus for a base traded in sessions; 0 for one traded continuously
         uint32 maxPriceAge; // seconds
         uint16 limitBps; // quoteLimit = value of baseIn at the feed's price * limitBps / 10000
         uint16 unwindBps; // above 10000
         uint16 gapBps; // open requires the position to stay not unwindable after a price fall of gapBps
         uint16 chargeBps; // owed = quoteLent + quoteLent * chargeBps / 10000, rounded up
         uint32 term; // seconds from open to dueAt
+        uint32 handoverDelay; // seconds past dueAt after which a position without a price is handed over
         uint8 baseDecimals;
     }
 
@@ -107,6 +122,10 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
     ///         valuation, threshold or settlement can overflow for amounts up to 2**128.
     uint256 public constant MAX_PRICE = 1e48;
     uint256 private constant MAX_AMOUNT = type(uint128).max;
+    /// @notice The shortest hand-over delay the lender may list: longer than the longest scheduled closure of a major
+    ///         stock market, so that a feed that does not answer while its market is closed is not taken for dead
+    ///         when it reopens, and longer than the halts that end with trading resuming.
+    uint32 public constant MIN_HANDOVER_DELAY = 14 days;
 
     IERC20Like private immutable _quote;
     uint8 private immutable _quoteDecimals;
@@ -173,7 +192,7 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
         if (t.base != address(0) && t.base != terms.base) revert BadTerms();
         if (
             terms.unwindBps <= BPS || terms.gapBps >= BPS || terms.limitBps == 0 || terms.maxPriceAge == 0
-                || terms.term == 0
+                || terms.term == 0 || terms.handoverDelay < MIN_HANDOVER_DELAY
         ) revert BadTerms();
         if (terms.baseDecimals != IERC20Like(terms.base).decimals() || terms.baseDecimals > 18) revert BadTerms();
         // The feed's decimals and its current answer must give a price within bounds.
@@ -226,7 +245,7 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
     function quoteLimit(address pool, uint256 baseIn) public view returns (uint256 limit) {
         PoolTerms storage t = _terms[pool];
         if (t.priceFeed == address(0)) return 0;
-        uint256 price = _readPrice(t.priceFeed, t.marketStatus, t.maxPriceAge, t.baseDecimals);
+        uint256 price = _readPrice(t.priceFeed, t.statusSource, t.maxPriceAge, t.baseDecimals);
         if (price == 0) return 0;
         if (baseIn > MAX_AMOUNT) baseIn = MAX_AMOUNT; // more than any supply; keeps the arithmetic in range
         limit = MulDiv.mulDiv(MulDiv.mulDiv(baseIn, price, PRICE_UNIT), t.limitBps, BPS);
@@ -273,12 +292,13 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
         p.positionManager = address(_manager);
         p.tokenId = tokenId;
         p.priceFeed = t.priceFeed;
-        p.marketStatus = t.marketStatus;
+        p.statusSource = t.statusSource;
         p.maxPriceAge = t.maxPriceAge;
         p.unwindBps = t.unwindBps;
         p.gapBps = t.gapBps;
         p.openedAt = uint64(block.timestamp);
         p.dueAt = uint64(block.timestamp) + t.term;
+        p.handoverDelay = t.handoverDelay;
         p.baseIn = baseUsed;
         p.quoteLent = quoteUsed;
         p.owed = quoteUsed + MulDiv.mulDivUp(quoteUsed, t.chargeBps, BPS);
@@ -357,10 +377,17 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
     /// @dev Every amount goes from the position manager straight to its recipient: the quote to this contract, the
     ///      lender's base to the fallback address, and the holder's part stays owed to the position token, which goes
     ///      to the holder. If the base cannot reach the fallback address, the position token goes there instead.
+    ///      Without a usable price, the position is handed over once a hand-over is due, and the call reverts before.
     function unwind(uint256 positionId) external lock {
         Position storage p = _positions[positionId];
         if (p.status != Status.Open) revert NotOpen();
-        uint256 price = _price(p);
+        if (p.owed == 0) revert NotUnwindable(); // nothing owed: only the holder's close ends it
+        uint256 price = _readPrice(p.priceFeed, p.statusSource, p.maxPriceAge, _terms[p.pool].baseDecimals);
+        if (price == 0) {
+            if (!_handoverDue(p)) revert PriceUnusable();
+            _handOver(positionId, p);
+            return;
+        }
         if (!_unwindable(p, _value(p, price))) revert NotUnwindable();
 
         uint256 owed = p.owed;
@@ -368,15 +395,7 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
         p.owed = 0;
         p.status = Status.Unwound;
 
-        (,,, uint128 liquidity,,) = _manager.positions(tokenId);
-        if (liquidity > 0) _manager.decreaseLiquidity(tokenId, liquidity);
-        (,,,, uint256 baseHeld, uint256 quoteHeld) = _manager.positions(tokenId);
-
-        uint256 recovered;
-        if (quoteHeld > 0 && owed > 0) {
-            recovered = _collectQuote(tokenId, address(this), owed);
-            if (recovered > owed) recovered = owed;
-        }
+        (uint256 recovered, uint256 baseHeld) = _withdrawQuote(tokenId, owed);
         address tokenTo = p.holder;
         uint256 rest = owed - recovered;
         if (rest > 0 && baseHeld > 0) {
@@ -395,11 +414,37 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
         emit PositionUnwound(positionId, recovered, owed - recovered);
     }
 
+    /// @dev Settles without a price: the lender takes the quote, up to what is owed, and the position token at its
+    ///      fallback address, with all the base still owed to it, the holder's part included. No base token moves.
+    function _handOver(uint256 positionId, Position storage p) private {
+        uint256 owed = p.owed;
+        uint256 tokenId = p.tokenId;
+        p.owed = 0;
+        p.status = Status.HandedOver;
+        (uint256 recovered,) = _withdrawQuote(tokenId, owed);
+        _manager.transferFrom(address(this), _fallback, tokenId);
+        emit PositionHandedOver(positionId, recovered, owed - recovered);
+    }
+
+    /// @dev Removes all of the position's liquidity and collects its quote, up to `owed`, to this contract. Returns
+    ///      what arrived, at most `owed`, and the base left owed to the position token. Reads no price.
+    function _withdrawQuote(uint256 tokenId, uint256 owed) private returns (uint256 recovered, uint256 baseHeld) {
+        (,,, uint128 liquidity,,) = _manager.positions(tokenId);
+        if (liquidity > 0) _manager.decreaseLiquidity(tokenId, liquidity);
+        uint256 quoteHeld;
+        (,,,, baseHeld, quoteHeld) = _manager.positions(tokenId);
+        if (quoteHeld > 0 && owed > 0) {
+            recovered = _collectQuote(tokenId, address(this), owed);
+            if (recovered > owed) recovered = owed;
+        }
+    }
+
     // ---------------------------------------------------------------- internals
 
-    /// @dev Due dates and price ages are measured in days and hours; the seconds a block producer can shift a
-    ///      timestamp by do not matter at that scale, so the two timestamp comparisons below are deliberate.
+    /// @dev Due dates, delays and price ages are measured in hours and days; the seconds a block producer can shift a
+    ///      timestamp by do not matter at that scale, so the timestamp comparisons below are deliberate.
     function _unwindable(Position storage p, uint256 value) private view returns (bool) {
+        if (p.owed == 0) return false; // repaid in full: never unwindable, at the due date or after it
         // forge-lint: disable-next-line(block-timestamp)
         if (p.dueAt != 0 && block.timestamp >= p.dueAt) return true;
         return value < MulDiv.mulDivUp(p.owed, p.unwindBps, BPS); // value * 10000 < owed * unwindBps, exactly
@@ -413,18 +458,69 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
     }
 
     function _price(Position storage p) private view returns (uint256 price) {
-        price = _readPrice(p.priceFeed, p.marketStatus, p.maxPriceAge, _terms[p.pool].baseDecimals);
+        price = _readPrice(p.priceFeed, p.statusSource, p.maxPriceAge, _terms[p.pool].baseDecimals);
         if (price == 0) revert PriceUnusable();
     }
 
-    /// @dev Quote units per 1e18 base units, or 0 when the feed's answer is not usable.
-    function _readPrice(address feed, address session, uint32 maxAge, uint8 baseDecimals)
+    /// @dev Called when no price is usable. A hand-over is due at once when the base will never trade again, and
+    ///      otherwise from `handoverDelay` past the due date, once no price has come for that long: the base halted
+    ///      for longer than the delay, or, while it trades or its status is unknown, the feed silent for longer than
+    ///      the delay, no answer of that time giving a price, the session aside. An unknown status, which a failing
+    ///      source also gives, counts only with a silent feed, whatever its `since`, so that a source failing for a
+    ///      moment cannot stand in for a price missing for the delay. A feed that is late but not silent, as when a
+    ///      session has just opened, is waited for, and so is the end of a session break, however long.
+    function _handoverDue(Position storage p) private view returns (bool) {
+        (ITradingStatus.TradingStatus status, uint64 since) = _status(p.statusSource);
+        if (status == ITradingStatus.TradingStatus.Terminal) return true; // delisted or redeemed: no price will come
+        // forge-lint: disable-next-line(block-timestamp)
+        if (p.dueAt == 0 || block.timestamp < uint256(p.dueAt) + p.handoverDelay) return false;
+        if (status == ITradingStatus.TradingStatus.SessionBreak) return false; // the reopening price will come
+        if (status == ITradingStatus.TradingStatus.Halted) {
+            // forge-lint: disable-next-line(block-timestamp)
+            return block.timestamp > uint256(since) + p.handoverDelay; // halted for longer than the delay
+        }
+        // Trading, or Unknown: only a feed silent for the whole delay shows that no price has come.
+        return _feedPrice(p.priceFeed, p.handoverDelay, 0, _terms[p.pool].baseDecimals) == 0;
+    }
+
+    /// @dev The base's trading status and since when; trading since 0 for a base with no status source, which trades
+    ///      continuously. A source that fails, has no code or answers outside the enumeration reads as unknown since 0,
+    ///      so that it can neither make a call revert nor read as trading.
+    function _status(address source) private view returns (ITradingStatus.TradingStatus, uint64) {
+        if (source == address(0)) return (ITradingStatus.TradingStatus.Trading, 0);
+        (bool ok, bytes memory data) = source.staticcall(abi.encodeCall(ITradingStatus.tradingStatus, ()));
+        if (!ok || data.length < 64) return (ITradingStatus.TradingStatus.Unknown, 0);
+        (uint256 status, uint256 since) = abi.decode(data, (uint256, uint256));
+        if (status > uint256(type(ITradingStatus.TradingStatus).max) || since > type(uint64).max) {
+            return (ITradingStatus.TradingStatus.Unknown, 0);
+        }
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return (ITradingStatus.TradingStatus(status), uint64(since)); // both in range, checked above
+    }
+
+    /// @dev Quote units per 1e18 base units, or 0 when no price is usable. For a base traded in sessions, a price
+    ///      counts only while the base trades, and only if it was set after the current session opened or trading
+    ///      resumed: a feed keeps its last answer through a weekend and may refresh its time without a new price, so
+    ///      its age alone cannot show that the price still holds.
+    function _readPrice(address feed, address source, uint32 maxAge, uint8 baseDecimals)
+        private
+        view
+        returns (uint256)
+    {
+        (ITradingStatus.TradingStatus status, uint64 since) = _status(source);
+        if (status != ITradingStatus.TradingStatus.Trading) return 0;
+        return _feedPrice(feed, maxAge, since, baseDecimals);
+    }
+
+    /// @dev The feed's answer as quote units per 1e18 base units, or 0 when the answer is not usable by itself (see
+    ///      `_answer` and `_normalize`) or was set before `notBefore`.
+    function _feedPrice(address feed, uint32 maxAge, uint256 notBefore, uint8 baseDecimals)
         private
         view
         returns (uint256)
     {
         (uint256 answer, uint256 updatedAt) = _answer(feed, maxAge);
-        if (answer == 0 || !_inSession(session, updatedAt)) return 0;
+        if (answer == 0 || updatedAt < notBefore) return 0;
         try IPriceFeed(feed).decimals() returns (uint8 feedDecimals) {
             return _normalize(answer, feedDecimals, baseDecimals);
         } catch {
@@ -453,19 +549,6 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
             return (uint256(answer), updatedAt); // 0 < answer <= type(int128).max, checked above
         } catch {
             return (0, 0);
-        }
-    }
-
-    /// @dev For a base traded in sessions, a price counts only while its market is open and not halted, and only if
-    ///      it was set after the current session opened: a feed keeps its last answer through a weekend and may
-    ///      refresh its time without a new price, so its age alone cannot show that the price still holds. A source
-    ///      that cannot answer counts as a closed market.
-    function _inSession(address session, uint256 updatedAt) private view returns (bool) {
-        if (session == address(0)) return true;
-        try IMarketSession(session).marketSession() returns (bool isOpen, uint64 openedAt) {
-            return isOpen && updatedAt >= openedAt;
-        } catch {
-            return false;
         }
     }
 

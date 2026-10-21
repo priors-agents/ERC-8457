@@ -14,7 +14,10 @@ position token.
 **Status: draft, not submitted.** The text is in
 [`ERCS/erc-draft_credit_matched_liquidity.md`](ERCS/erc-draft_credit_matched_liquidity.md). Its `eip: 99908` is a
 placeholder: the ERC editors assign the real number when the pull request is opened on ethereum/ERCs. Discussion:
-[Ethereum Magicians](https://ethereum-magicians.org/t/erc-tba-credit-matched-liquidity/30039).
+[Ethereum Magicians](https://ethereum-magicians.org/t/erc-tba-credit-matched-liquidity/30039). The second revision
+(2026-10-21) takes in the review there by Zealynx: a timed hand-over to the lender when no price comes past the due
+date, a trading status that tells a session break from a halt and from a delisting or a redemption, and a fix so that
+a position whose fees repaid it in full is never unwound.
 
 ## Why
 
@@ -35,8 +38,8 @@ loan funds the position itself, and three rules where such lending has gone wron
 The open draft "Asset Status Interface for Tokenized Assets" (ethereum/ERCs pull request
 https://github.com/ethereum/ERCs/pull/1964, numbered ERC-8392 in its thread https://ethereum-magicians.org/t/29489 and
 8391 in the pull request's file) adds token-level views of a reference market's session, its halts and how stale the
-asset's valuation is. A conforming escrow MAY read such a status as its market-status source; the reference
-implementation reads a reduced session interface that an adapter over it can provide.
+asset's valuation is. A conforming escrow MAY derive its status source from such a status; the reference
+implementation reads a reduced trading-status interface, `ITradingStatus`, that an adapter over it can provide.
 
 ## What is here
 
@@ -45,8 +48,8 @@ implementation reads a reduced session interface that an adapter over it can pro
 | `ERCS/erc-draft_credit_matched_liquidity.md` | The ERC text, in the ethereum/ERCs template |
 | `src/ICreditMatchedLiquidity.sol` | The interface |
 | `src/CreditMatchedLiquidity.sol` | A reference escrow and lender, one lender per contract (not audited; never deploy without an external audit) |
-| `test/CreditMatchedLiquidity.t.sol` | Foundry tests of the reference against the specification, including manipulated pool prices, stale and closed-market prices, blocked transfers, a quote token that charges on transfer, token and feed decimals from 0 to 18, and prices at the bounds |
-| `test/mocks/Mocks.sol` | Mocks (not audited; never deploy): a v3-style position manager, a price feed, a market session, ERC-20 tokens with a transfer registry and an optional transfer fee, an identity registry |
+| `test/CreditMatchedLiquidity.t.sol` | Foundry tests of the reference against the specification, including manipulated pool prices, stale and closed-market prices, halts, delistings and hand-overs, blocked transfers, a quote token that charges on transfer, token and feed decimals from 0 to 18, and prices at the bounds |
+| `test/mocks/Mocks.sol` | Mocks (not audited; never deploy): a v3-style position manager, a price feed, a trading-status source, ERC-20 tokens with a transfer registry and an optional transfer fee, an identity registry |
 | `scripts/lint-erc.sh` | Lints the ERC text with eipw the way the ethereum/ERCs CI does |
 | `eipw.toml` | The ethereum/ERCs repository's eipw configuration, copied as is |
 

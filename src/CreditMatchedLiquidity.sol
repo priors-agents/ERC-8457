@@ -93,11 +93,11 @@ interface IERC165 {
 ///         not used. Fees in the quote token pay the lender first; fees in the base token stay in the position.
 ///         Unwinding settles at the feed's price and never sends the base token through this contract, so a transfer
 ///         registry that blocks it cannot strand a position. When no price has come for the hand-over delay past the
-///         due date, or the base will never trade again, the position is handed over without a price: the lender takes
-///         the quote, up to what is owed, and the position token. A position with nothing owed is never unwound or
-///         handed over. Prices are bounded by `MAX_PRICE` and every product of a price and an amount is computed in
-///         512 bits; every movement of the quote token is counted by the balance that changed, not the amount
-///         requested.
+///         due date, or a day after the base stopped trading for good, the position is handed over without a price:
+///         the lender takes the quote, up to what is owed, and the position token. A position with nothing owed is
+///         never unwound or handed over. Prices are bounded by `MAX_PRICE` and every product of a price and an amount
+///         is computed in 512 bits; every movement of the quote token is counted by the balance that changed, not the
+///         amount requested.
 /// @dev Not audited. A reference for the interface, written against mocks. Never deploy without an external audit.
 /// @custom:security Not audited. Never deploy without an external audit.
 contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
@@ -122,10 +122,14 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
     ///         valuation, threshold or settlement can overflow for amounts up to 2**128.
     uint256 public constant MAX_PRICE = 1e48;
     uint256 private constant MAX_AMOUNT = type(uint128).max;
-    /// @notice The shortest hand-over delay the lender may list: longer than the longest scheduled closure of a major
-    ///         stock market, so that a feed that does not answer while its market is closed is not taken for dead
-    ///         when it reopens, and longer than the halts that end with trading resuming.
+    /// @notice The shortest hand-over delay the lender may list, the floor the draft requires: longer than the
+    ///         longest scheduled closure of a major stock market, so that a feed that does not answer while its market
+    ///         is closed is not taken for dead when it reopens, and longer than the halts that end with trading
+    ///         resuming. `listPool` reverts with `BadTerms` below it, so no position records a shorter delay.
     uint32 public constant MIN_HANDOVER_DELAY = 14 days;
+    /// @notice How long after the `since` of a terminal status a position is handed over for it: a day in which the
+    ///         holder can still close, which needs no price, and keep its part.
+    uint32 public constant TERMINAL_GRACE = 1 days;
 
     IERC20Like private immutable _quote;
     uint8 private immutable _quoteDecimals;
@@ -462,16 +466,22 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
         if (price == 0) revert PriceUnusable();
     }
 
-    /// @dev Called when no price is usable. A hand-over is due at once when the base will never trade again, and
-    ///      otherwise from `handoverDelay` past the due date, once no price has come for that long: the base halted
-    ///      for longer than the delay, or, while it trades or its status is unknown, the feed silent for longer than
-    ///      the delay, no answer of that time giving a price, the session aside. An unknown status, which a failing
-    ///      source also gives, counts only with a silent feed, whatever its `since`, so that a source failing for a
-    ///      moment cannot stand in for a price missing for the delay. A feed that is late but not silent, as when a
-    ///      session has just opened, is waited for, and so is the end of a session break, however long.
+    /// @dev Called when no price is usable. A hand-over is due, whatever the due date, once `TERMINAL_GRACE` has
+    ///      passed since the base stopped trading for good, as its status source reports: a terminal status whose
+    ///      `since` is ahead of the block has begun no grace. Otherwise it is due from `handoverDelay` past the due
+    ///      date, once no price has come for that long: the base halted for longer than the delay, or, while it trades,
+    ///      while its status is unknown or while a terminal status is in its grace, the feed silent for longer than the
+    ///      delay, no answer of that time giving a price, the session aside. An unknown status, which a failing source
+    ///      also gives, counts only with a silent feed, whatever its `since`, so that a source failing for a moment
+    ///      cannot stand in for a price missing for the delay. A feed that is late but not silent, as when a session
+    ///      has just opened, is waited for, and so is the end of a session break, however long.
     function _handoverDue(Position storage p) private view returns (bool) {
         (ITradingStatus.TradingStatus status, uint64 since) = _status(p.statusSource);
-        if (status == ITradingStatus.TradingStatus.Terminal) return true; // delisted or redeemed: no price will come
+        // Delisted or redeemed: no price will come, and the holder has had a day to close.
+        // forge-lint: disable-next-line(block-timestamp)
+        if (status == ITradingStatus.TradingStatus.Terminal && block.timestamp >= uint256(since) + TERMINAL_GRACE) {
+            return true;
+        }
         // forge-lint: disable-next-line(block-timestamp)
         if (p.dueAt == 0 || block.timestamp < uint256(p.dueAt) + p.handoverDelay) return false;
         if (status == ITradingStatus.TradingStatus.SessionBreak) return false; // the reopening price will come
@@ -479,7 +489,8 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
             // forge-lint: disable-next-line(block-timestamp)
             return block.timestamp > uint256(since) + p.handoverDelay; // halted for longer than the delay
         }
-        // Trading, or Unknown: only a feed silent for the whole delay shows that no price has come.
+        // Trading, Unknown, or Terminal in its grace: only a feed silent for the whole delay shows that no price has
+        // come, and a terminal status in its grace does not hold back the hand-over that such a feed makes due.
         return _feedPrice(p.priceFeed, p.handoverDelay, 0, _terms[p.pool].baseDecimals) == 0;
     }
 

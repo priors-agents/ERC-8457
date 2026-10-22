@@ -6,8 +6,8 @@ pragma solidity ^0.8.20;
 ///         owns. The position stays in escrow; quote fees pay the lender first; the holder closes by repaying; anyone
 ///         unwinds it once the price feed `oracleOf(pool)` names, never the pool's own price, says it no longer covers
 ///         the loan. A price set while the base's reference market was closed is never used. When no price comes for
-///         the hand-over delay past the due date, or the base will never trade again, anyone hands the position over to
-///         the lender without a price. Not audited: never deploy without an external audit.
+///         the hand-over delay past the due date, or a day after the base stopped trading for good, anyone hands the
+///         position over to the lender without a price. Not audited: never deploy without an external audit.
 /// @dev The ERC-165 identifier is `type(ICreditMatchedLiquidity).interfaceId`.
 /// @custom:security Not audited. Never deploy without an external audit.
 interface ICreditMatchedLiquidity {
@@ -32,7 +32,7 @@ interface ICreditMatchedLiquidity {
         uint16 gapBps; // the price fall a new position had to survive without becoming unwindable
         uint64 openedAt;
         uint64 dueAt; // unwindable from this time on; 0 for no due date
-        uint32 handoverDelay; // seconds past dueAt after which a position without a price is handed over
+        uint32 handoverDelay; // seconds past dueAt after which a position without a price is handed over; >= 14 days
         uint256 baseIn; // base the position took
         uint256 quoteLent; // quote the position took
         uint256 owed; // quote that `close` takes now

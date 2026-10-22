@@ -22,8 +22,8 @@ pool and never from the pool's own price, no longer covers the loan by the margi
 A price set while the base token was not trading is never used. The unwind settles at the feed's price without a swap,
 pays the lender's base tokens to a fallback address the lender names, and leaves the holder's part in the position
 token, so a token whose transfer registry blocks an address cannot strand a position. When, past the due date, no price
-has come for a delay the lender lists, or when the base token will never trade again, anyone may instead hand the
-position over to the lender without a price.
+has come for a delay the lender lists, at least 14 days, or once a day has passed since the base token stopped trading
+for good, anyone may instead hand the position over to the lender without a price.
 
 ## Motivation
 
@@ -196,7 +196,8 @@ interface ICreditMatchedLiquidity {
   one session's last price and the next session's first, across a weekend or a holiday and through news, and SHOULD
   choose `unwindBps` and the ratio behind `quoteLimit` so that a position at its unwind line is still worth more than
   it owes after that move.
-- The lender SHOULD list a `handoverDelay` of at least 14 days (1,209,600 seconds).
+- A position's `handoverDelay` MUST be at least 14 days (1,209,600 seconds): `open` MUST NOT record a shorter one,
+  whatever delay the lender lists.
 
 ### Escrow and terms
 
@@ -259,12 +260,19 @@ interface ICreditMatchedLiquidity {
 
 ### Hand-over
 
+- `TERMINAL_GRACE` is 86,400 seconds (one day): the time a holder has to close once its base token stops trading for
+  good, counted from the `since` its status source reports with `Terminal`.
 - A hand-over is due for an `Open` position whose `owed` is not zero and whose price is not usable when:
-  1. its status source reports `Terminal`, whatever `dueAt`; or
+  1. its status source reports `Terminal` and the block timestamp is at or after `since + TERMINAL_GRACE`, whatever
+     `dueAt`; or
   2. `dueAt` is not zero, the block timestamp is at or after `dueAt + handoverDelay`, and no price has come for the
      hand-over delay: the status source reports `Halted` with a `since` more than `handoverDelay` before the block
-     timestamp; or the feed is silent while the status source reports `Trading` or `Unknown`, or while the base token
-     has no status source.
+     timestamp; or the feed is silent while the status source reports `Trading`, `Unknown` or `Terminal`, or while the
+     base token has no status source.
+- Before `since + TERMINAL_GRACE`, a `Terminal` status makes no hand-over due by itself: `unwind` reverts, as for any
+  price that is not usable, unless condition 2 already makes a hand-over due, and `close` works as always, since it
+  needs no price. A `since` later than the block timestamp has begun no window: the status gives no price, and
+  condition 1 holds only from `since + TERMINAL_GRACE`.
 - The feed is **silent** when its answer would not be a usable price even with `handoverDelay` in place of
   `maxPriceAge` and without condition 3 of a usable price, that is, when it has given no answer the contract could
   price within the last `handoverDelay`. A feed that answered within that time is late, not silent: the contract waits
@@ -303,11 +311,12 @@ interface ICreditMatchedLiquidity {
   are when the reopening price gaps the most, if it comes at all. The status therefore tells apart a session break,
   after which a price comes back, a halt, which may last, and a terminal state, after which no price will come. None
   of them gives a price; they differ past the due date: a break is waited out, a halt is waited out for the hand-over
-  delay, and a terminal state is handed over at once, due or not, since waiting cannot bring a price. `since` dates a
-  price against the session it belongs to and times a halt. `Unknown` is zero so that a source that was never set
-  reads as unknown, not as trading, and a source that cannot answer reads the same, so that it lets no price through.
-  An unknown status says nothing about how long the price has been missing, so it counts toward a hand-over only with
-  a feed silent for the whole delay: a source that fails for a moment cannot cost the holder its part.
+  delay, and a terminal state is handed over after a day's grace, due or not, since waiting cannot bring a price.
+  `since` dates a price against the session it belongs to, times a halt and starts a terminal state's grace. `Unknown`
+  is zero so that a source that was never set reads as unknown, not as trading, and a source that cannot answer reads
+  the same, so that it lets no price through. An unknown status says nothing about how long the price has been
+  missing, so it counts toward a hand-over only with a feed silent for the whole delay: a source that fails for a
+  moment cannot cost the holder its part.
 - **A small status interface of its own.** Asset-status interfaces drafted for tokenized assets report more than the
   escrow needs: the program's lifecycle, the session and any interruption separately, the state of the valuation
   source. `ITradingStatus` reduces them to the one answer the escrow acts on, and an adapter can derive it from such an
@@ -351,15 +360,27 @@ interface ICreditMatchedLiquidity {
   and end with a price.
 - **The hand-over delay is the lender's, with a floor.** The delay is a term like `gapBps`: the lender lists it and the
   position records it, so a holder knows at opening how long past the due date it can still close, and lenders can
-  compete on it; one delay fixed in this proposal would not fit every base token and every lender. It SHOULD still be
-  at least 14 days, for three reasons. It is how long a feed must be silent to count as dead, and some stock exchanges
+  compete on it; one delay fixed in this proposal would not fit every base token and every lender. It MUST still be at
+  least 14 days, for three reasons. It is how long a feed must be silent to count as dead, and some stock exchanges
   close on schedule for up to about ten days, around the lunar new year, so a shorter delay would let a feed that does
   not answer while its market is closed look dead at the reopening, minutes before the session's first price. It is
   how long a halt must last before the position is handed over, and a trading suspension by the United States
   securities regulator lasts up to ten business days, about 14 calendar days, while most halts end within the day.
-  And it is the holder's last time to close after the due date, which two weeks give across a holiday. The lender
+  And it is the holder's last time to close after the due date, which two weeks give across a holiday. The floor is a
+  requirement, not a recommendation, so that a holder can trust the delay of any conforming contract without checking
+  it pool by pool: no conforming lender can list a few hours and take positions over an ordinary outage. The lender
   waits at most the delay past the later of the due date and the moment the price stopped coming, and a lender that
   wants to wait less can lend for a shorter term.
+- **A day's grace after a terminal status.** A base token that will never trade again will never give a price, so a
+  terminal status does not wait for the due date. A hand-over still takes the holder's part, and closing needs no
+  price, so the hand-over waits `TERMINAL_GRACE`, one day, from the `since` the status source reports: a holder that is
+  watching can repay and keep its part, and a wrong `Terminal` leaves holders a day to react. The lender, which can do
+  nothing with a price that will not come, waits only that day. The window is fixed in this proposal rather than
+  listed by the lender, since it only protects the holder and its length depends on how long a holder needs to repay
+  in the quote token, not on the base token's market. It runs from `since` because a view keeps no record of when its
+  answer changed: the contract cannot tell when a status was first reported, only when the source says it began. A
+  hand-over due for another reason, a feed silent for the hand-over delay past the due date, does not wait for the
+  window: the holder has already had the term and the delay to close.
 - **Nothing owed, nothing to unwind.** Fees can repay a position in full before it is due. A due date ends the lender's
   exposure, and with nothing owed there is none, so such a position is never unwindable and never handed over; its
   holder closes it, paying nothing, and gets the position token back as `Closed`. Otherwise anyone could pull the
@@ -413,8 +434,8 @@ The positions in the tests are full-range, so this one is worth 50,000 at 250, a
   `unwind` revert and `quoteLimit` return 0. One second before `dueAt` a healthy position cannot be unwound; at `dueAt`
   it can.
 - With quote fees that repay all that is owed, the position is not unwindable at `dueAt`, and an unwind by anyone
-  reverts at `dueAt`, past the hand-over time with the feed silent, and with a terminal status. The holder's close
-  takes nothing, emits `PositionClosed` with 0, and returns the position token as `Closed`.
+  reverts at `dueAt`, past the hand-over time with the feed silent, and with a terminal status, at once and a day
+  later. The holder's close takes nothing, emits `PositionClosed` with 0, and returns the position token as `Closed`.
 - With the base token blocking the escrow and the holder, the unwind at 70 still pays 171.732 base to the fallback
   address. With the base token blocking the pool, it pays the quote, gives the position token to the fallback address
   and reports the base it could not pay as shortfall.
@@ -423,6 +444,8 @@ The positions in the tests are full-range, so this one is worth 50,000 at 250, a
   minute before the opening is not used, and the first answer of the session, 70, allows the unwind. A halt gives no
   price either. A status source that reverts, has no code or answers outside `TradingStatus` gives no price; a pool
   whose base trades continuously needs no status source.
+- No position records a `handoverDelay` below 14 days: terms with a delay of 0, six hours or one second short of 14
+  days are refused, and a position opened on terms of 14 days records 14 days.
 - With the feed silent since the opening, an unwind one second before `dueAt + handoverDelay` reverts. At that time an
   unwind by a stranger hands the position over: the lender receives 25,000 quote, and the position token with the 100
   base still in it at its fallback address; no base token moves; the status is `HandedOver`; and `PositionHandedOver`
@@ -433,11 +456,17 @@ The positions in the tests are full-range, so this one is worth 50,000 at 250, a
   over; once the market reopens, an answer from before the break is late, not silent, and the first answer of the
   session, 70, unwinds the position at a price, leaving the holder its part. The same stop reported as a halt hands
   over. A halt that began an hour before the hand-over time hands over only once it has lasted more than 14 days.
-- A terminal status hands a healthy position over at once, a month before `dueAt`, while the feed still answers and
-  the base token blocks every transfer. A status source that reverts or answers outside `TradingStatus`, once or for
-  longer, hands nothing over past `dueAt + handoverDelay` while the feed answers; once the source answers again, the
-  overdue position is unwound at the feed's 250 and the holder keeps its part. With the source failing and the feed
-  silent for exactly 14 days the unwind reverts, and one second later it hands the position over.
+- A terminal status gives no price and hands nothing over for a day: with the feed still answering, an unwind reverts
+  at once and one second before `since + TERMINAL_GRACE`, and at that time an unwind by a stranger hands a healthy
+  position over, a month before `dueAt`, while the base token blocks every transfer. Inside the day, with the feed
+  dead, a stranger's unwind reverts and the holder's close takes 25,250 and returns the position token, with all of
+  its liquidity, as `Closed`. A terminal status dated a day ahead of the block hands over two days later, and one
+  dated a day back hands over at once. Past `dueAt + handoverDelay`, a terminal status that begins when the feed has
+  been silent for the delay hands the position over at once; with the feed answering, it waits its day.
+- A status source that reverts or answers outside `TradingStatus`, once or for longer, hands nothing over past
+  `dueAt + handoverDelay` while the feed answers; once the source answers again, the overdue position is unwound at the
+  feed's 250 and the holder keeps its part. With the source failing and the feed silent for exactly 14 days the unwind
+  reverts, and one second later it hands the position over.
 - With a quote token that burns 1% of every transfer, a close that would deliver 24,997.5 of the 25,250 owed reverts;
   quote fees of 300 pay the lender the 297 that arrive and reduce `owed` by 297; and the unwind at 70 takes base for what
   is owed minus the quote that arrived.
@@ -452,12 +481,14 @@ The positions in the tests are full-range, so this one is worth 50,000 at 250, a
 
 `CreditMatchedLiquidity` accompanies this proposal with its tests and mocks. It has one lender: its own quote balance is
 what it lends, and the lender lists each pool with a price feed, a status source for a base traded in sessions, the
-ratio behind `quoteLimit`, `unwindBps`, `gapBps`, a charge, a term, a hand-over delay, which it refuses below 14 days,
-and `maxPriceAge`. It talks to a v3-style position manager through a reduced interface whose `amountsAt` returns what
-a position holds at a given price; against a Uniswap v3 manager an implementation computes the same with that
-protocol's tick and liquidity math. It reads the trading status through `ITradingStatus`, which an adapter can derive
-from a status interface on the token, a feed's market-status report or an issuer's pause flag, with a low-level call
-whose answer it checks, so that a source that reverts, has no code or answers outside `TradingStatus` reads as
+ratio behind `quoteLimit`, `unwindBps`, `gapBps`, a charge, a term, a hand-over delay and `maxPriceAge`. Its `listPool`
+reverts with `BadTerms()` for a hand-over delay below `MIN_HANDOVER_DELAY`, 14 days, so that no position records a
+shorter one, and it hands a position over for a terminal status `TERMINAL_GRACE`, one day, after the status's `since`;
+both are public constants. It talks to a v3-style position manager through a reduced interface whose `amountsAt`
+returns what a position holds at a given price; against a Uniswap v3 manager an implementation computes the same with
+that protocol's tick and liquidity math. It reads the trading status through `ITradingStatus`, which an adapter can
+derive from a status interface on the token, a feed's market-status report or an issuer's pause flag, with a low-level
+call whose answer it checks, so that a source that reverts, has no code or answers outside `TradingStatus` reads as
 `Unknown` and makes no call revert. It accepts prices up to 1e48 quote units per 1e18 base units, which keeps every
 amount in range for token amounts up to 2^128, computes with a 512-bit multiply-then-divide, and measures every
 movement of the quote token by balance. It is not audited and must never be deployed without an external audit.
@@ -478,32 +509,46 @@ movement of the quote token by balance. It is not audited and must never be depl
   can differ from the last by more than `gapBps`. A position can then be worth less than it owes when it first becomes
   unwindable, and the lender takes the shortfall; `gapBps` and `unwindBps` are its only protection, since there is no
   price in a closed market at which an unwind could do better. A halt, a delisting or a redemption can gap further, or
-  end with no price at all; past the hand-over delay, or at once for a terminal status, the lender then takes the
+  end with no price at all; past the hand-over delay, or a day after a terminal status began, the lender then takes the
   position without a price.
 - **The hand-over and the holder.** A hand-over gives the lender the whole position token: the holder's part of the
   base, and any quote beyond `owed`, go with it, and whatever the lender returns of it is settled outside this
   interface. A holder that wants to keep its part has to close before `dueAt + handoverDelay`; closing needs no price,
-  so no outage or halt stops it. A terminal status hands a position over at once, before its due date too, so holders
-  of a base token that can be delisted or redeemed SHOULD watch its status and keep the quote to close at hand.
+  so no outage or halt stops it. A terminal status hands a position over `TERMINAL_GRACE`, one day, after the `since`
+  its source reports, before its due date too, so holders of a base token that can be delisted or redeemed SHOULD
+  watch its status and keep the quote to close at hand.
 - **A short hand-over delay.** The delay is the holder's last time to close after the due date, and how long a feed
-  must be silent, or a halt last, before the lender takes the whole position without a price. A lender that lists a
-  delay of hours can take positions over an outage or a halt that would have ended in an unwind at a price, in which
-  the holder keeps its part, and a lender that runs the feed, or can hold back its updates, can arrange such an outage.
-  A delay shorter than the longest scheduled closure of the base token's market lets a feed that does not answer while
-  the market is closed look silent at the reopening, before the session's first price, when anyone, the lender's
-  keeper first, can hand the position over. Holders SHOULD NOT open a position whose `handoverDelay` is below 14 days.
+  must be silent, or a halt last, before the lender takes the whole position without a price. A delay of hours would
+  let a lender take positions over an outage or a halt that would have ended in an unwind at a price, in which the
+  holder keeps its part, and a lender that runs the feed, or can hold back its updates, could arrange such an outage.
+  A delay shorter than the longest scheduled closure of the base token's market would let a feed that does not answer
+  while the market is closed look silent at the reopening, before the session's first price, when anyone, the lender's
+  keeper first, could hand the position over. The floor of 14 days is therefore a requirement: a contract that records
+  a shorter `handoverDelay` does not conform, and a holder can rely on the floor without reading each pool's terms.
 - **A wrong or malicious status source.** The status source is trusted like the feed, and one the lender controls is
-  worse than a feed it controls: by reporting `Terminal` it hands every open position over at once, due or not,
-  holder's part included. Holders SHOULD open only against a status source the lender cannot write, such as the token
-  issuer's own status or an adapter over it. A source that reports `Trading` during a halt or a break lets a stale
-  price through. One that reports a session break for ever stops every unwind and every hand-over, and the lender
-  waits on it as on a feed that never returns. One that wrongly reports `Halted` can hand over only a position already
-  past its due date and delay, and only once the halt it reports has lasted the delay. A source that reverts, has no
-  code or answers outside `TradingStatus` reads as `Unknown`, and so does one that reports it: it lets no price
-  through, and it hands a position over only from `dueAt + handoverDelay` and only when the feed has also been silent
-  for the whole delay, the same bar as a silent feed alone, so a source that fails for one call hands nothing over. A
-  source that stays unknown while the feed keeps answering stops every unwind and every hand-over, like one that
-  reports a session break for ever.
+  worse than a feed it controls: by reporting `Terminal` it hands every open position over a day later, due or not,
+  holder's part included, and at once if it dates the status a day back. Holders SHOULD open only against a status
+  source the lender cannot write, such as the token issuer's own status or an adapter over it. A source that reports
+  `Trading` during a halt or a break lets a stale price through. One that reports a session break for ever stops every
+  unwind and every hand-over, and the lender waits on it as on a feed that never returns; so does one that reports
+  `Terminal` with a `since` far ahead while the feed keeps answering. One that wrongly reports `Halted` can hand over
+  only a position already past its due date and delay, and only once the halt it reports has lasted the delay. A
+  source that reverts, has no code or answers outside `TradingStatus` reads as `Unknown`, and so does one that reports
+  it: it lets no price through, and it hands a position over only from `dueAt + handoverDelay` and only when the feed
+  has also been silent for the whole delay, the same bar as a silent feed alone, so a source that fails for one call
+  hands nothing over. A source that stays unknown while the feed keeps answering stops every unwind and every
+  hand-over, like one that reports a session break for ever.
+- **A backdated `since`.** The grace after a terminal status runs from the `since` the status source reports, which
+  the contract cannot check. A source that reports `Terminal` with a `since` a day or more in the past hands positions
+  over with no window at all, and an honest source that learns of a delisting late, and dates it from when it took
+  effect, leaves less than a day. Trusting a source with `since` is the same trust as trusting it with `Terminal`: a
+  source that would backdate `since` could as well report `Terminal` falsely, and the grace protects holders only
+  against a terminal state that is real and reported when it happens. Holders limit the risk as they limit a false
+  `Terminal`: by opening only against a source the lender cannot write and that reports promptly, such as the token
+  issuer's own status or an adapter over it, and by watching the base token's status, and the issuer's notices of a
+  delisting or a redemption, which often come before it takes effect, so as to close as soon as one is announced or
+  reported. A `since` later than the block timestamp begins no window: it holds the hand-over back until
+  `since + TERMINAL_GRACE`, unless a feed silent for the hand-over delay past the due date makes one due first.
 - **Telling a hand-over from an unwind.** A hand-over emits `PositionHandedOver` and leaves the status `HandedOver`; an
   unwind emits `PositionUnwound` and leaves `Unwound`, and neither emits the other's event. `shortfall` in an unwind is
   a loss valued at the feed's price. `outstanding` in a hand-over is not valued: it is what the quote did not cover,

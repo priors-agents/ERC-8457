@@ -9,10 +9,10 @@ import {MockToken, MockPriceFeed, MockTradingStatus, MockPositionManager, MockRe
 /// @dev The scenario of the ERC's Test Cases: a base token of 18 decimals priced 250 quote by a feed of 8 decimals, a
 ///      quote token of 6 decimals, a lender lending up to the value of the base brought (limit 10000), unwinding below
 ///      11000, asking new positions to survive a 20% gap, charging 1%, for 30 days, handing a position over 14 days
-///      past its due date, with prices at most a day old and set in the current session of the base's reference
-///      market. The holder brings 100 base and borrows 25,000 quote. Mock positions are full-range constant-product
-///      liquidity, so a position worth 50,000 at 250 is worth 50,000 * sqrt(P / 250) at a price P: healthy at 80
-///      (28,284 >= 1.1 * 25,250), unwindable at 70 (26,457).
+///      past its due date, or a day after its base's status turns terminal, with prices at most a day old and set in
+///      the current session of the base's reference market. The holder brings 100 base and borrows 25,000 quote. Mock
+///      positions are full-range constant-product liquidity, so a position worth 50,000 at 250 is worth
+///      50,000 * sqrt(P / 250) at a price P: healthy at 80 (28,284 >= 1.1 * 25,250), unwindable at 70 (26,457).
 /// @notice Tests of the reference implementation. Not audited: never deploy anything here without an external audit.
 /// @custom:security Not audited. Never deploy without an external audit.
 contract CreditMatchedLiquidityTest is Test {
@@ -22,6 +22,7 @@ contract CreditMatchedLiquidityTest is Test {
     uint256 constant TOL = 1e14; // 0.01%, for amounts that go through a square root
     address constant UNLISTED = address(0xBEEF);
     uint32 constant HANDOVER = 14 days;
+    uint32 constant GRACE = 1 days; // a terminal status hands over this long after the since it reports
     ITradingStatus.TradingStatus constant TRADING = ITradingStatus.TradingStatus.Trading;
     ITradingStatus.TradingStatus constant BREAK = ITradingStatus.TradingStatus.SessionBreak;
     ITradingStatus.TradingStatus constant HALTED = ITradingStatus.TradingStatus.Halted;
@@ -916,9 +917,11 @@ contract CreditMatchedLiquidityTest is Test {
         assertEq(topic, ICreditMatchedLiquidity.PositionHandedOver.selector);
     }
 
-    function test_handover_terminal_atOnce_dueOrNot_movingNoBase() public {
+    function test_handover_terminal_aDayAfterSince_dueOrNot_movingNoBase() public {
+        assertEq(cml.TERMINAL_GRACE(), GRACE);
         uint256 id = _open();
-        market.set(TERMINAL, uint64(block.timestamp)); // delisted the day it opened, long before it is due
+        uint64 since = uint64(block.timestamp);
+        market.set(TERMINAL, since); // delisted the day it opened, long before it is due
         _oracle(250); // the feed still answers; it is not used
         base.setBlocked(address(cml), true); // the delisted token's registry blocks every transfer
         base.setBlocked(address(pm), true);
@@ -926,7 +929,15 @@ contract CreditMatchedLiquidityTest is Test {
         base.setBlocked(fallbackAddr, true);
         vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
         cml.health(id);
+        vm.prank(stranger);
+        vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector); // not at once: the holder has a day to close
+        cml.unwind(id);
+        vm.warp(since + GRACE - 1);
+        _oracle(250);
+        vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
+        cml.unwind(id);
 
+        vm.warp(since + GRACE); // a day after the status turned terminal, a month before the due date
         vm.recordLogs();
         vm.prank(stranger);
         cml.unwind(id);
@@ -937,6 +948,102 @@ contract CreditMatchedLiquidityTest is Test {
         assertEq(pm.ownerOf(_tokenId(id)), fallbackAddr);
         (uint256 owedBase,) = _owedInToken(id);
         assertApproxEqRel(owedBase, 100e18, TOL);
+        assertLt(block.timestamp, cml.positionOf(id).dueAt);
+    }
+
+    function test_terminal_theHolderClosesInsideTheDay_andKeepsItsPart() public {
+        uint256 id = _open();
+        (,,, uint128 liquidity,,) = pm.positions(_tokenId(id));
+        uint64 since = uint64(block.timestamp);
+        market.set(TERMINAL, since); // delisted: no price will come
+        feed.set(0, 0);
+        vm.warp(since + GRACE - 1);
+        vm.prank(stranger); // the lender's keeper as much as anyone
+        vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
+        cml.unwind(id);
+
+        quote.mint(holder, 25_250e6);
+        uint256 lenderBefore = quote.balanceOf(address(cml));
+        vm.expectEmit(true, false, false, true, address(cml));
+        emit ICreditMatchedLiquidity.PositionClosed(id, 25_250e6);
+        vm.prank(holder);
+        cml.close(id); // needs no price
+        assertEq(quote.balanceOf(address(cml)), lenderBefore + 25_250e6);
+        assertEq(pm.ownerOf(_tokenId(id)), holder);
+        (,,, uint128 left,,) = pm.positions(_tokenId(id));
+        assertEq(left, liquidity); // all of it, the holder's 100 base included
+        assertEq(uint8(cml.positionOf(id).status), uint8(ICreditMatchedLiquidity.Status.Closed));
+
+        vm.warp(since + GRACE);
+        vm.expectRevert(CreditMatchedLiquidity.NotOpen.selector);
+        cml.unwind(id);
+    }
+
+    function test_handover_terminal_theDayRunsFromSince() public {
+        uint256 ahead = _open();
+        uint256 backdated = _open();
+        uint64 since = uint64(block.timestamp + 1 days);
+        market.set(TERMINAL, since); // reported now, dated a day ahead: no window has begun
+        vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
+        cml.unwind(ahead);
+        vm.warp(since + GRACE - 1);
+        vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
+        cml.unwind(ahead);
+        vm.warp(since + GRACE);
+        vm.recordLogs();
+        cml.unwind(ahead);
+        (bytes32 topic,,) = _unwindLog();
+        assertEq(topic, ICreditMatchedLiquidity.PositionHandedOver.selector);
+
+        market.set(TERMINAL, uint64(block.timestamp - GRACE)); // reported now, dated a day back: no window is left
+        vm.recordLogs();
+        cml.unwind(backdated);
+        (topic,,) = _unwindLog();
+        assertEq(topic, ICreditMatchedLiquidity.PositionHandedOver.selector);
+    }
+
+    function test_handover_terminal_doesNotDelayAHandoverAlreadyDue() public {
+        uint256 first = _open(); // the feed answers now, and then nothing until the hand-over time
+        uint256 second = _open();
+        vm.warp(cml.positionOf(first).dueAt + HANDOVER);
+        uint64 since = uint64(block.timestamp);
+        market.set(TERMINAL, since); // terminal from now, past the due date and the delay
+        vm.recordLogs();
+        cml.unwind(first); // the feed has been silent for the delay: the hand-over was due before the status changed
+        (bytes32 topic,,) = _unwindLog();
+        assertEq(topic, ICreditMatchedLiquidity.PositionHandedOver.selector);
+
+        _oracle(250); // the feed answers: only the terminal status could make a hand-over due, and it waits its day
+        vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
+        cml.unwind(second);
+        vm.warp(since + GRACE - 1);
+        _oracle(250);
+        vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
+        cml.unwind(second);
+        vm.warp(since + GRACE);
+        vm.recordLogs();
+        cml.unwind(second);
+        (topic,,) = _unwindLog();
+        assertEq(topic, ICreditMatchedLiquidity.PositionHandedOver.selector);
+    }
+
+    function test_handoverDelay_belowTheFloorIsRefused() public {
+        assertEq(cml.MIN_HANDOVER_DELAY(), 14 days);
+        CreditMatchedLiquidity.PoolTerms memory t = _terms(address(feed));
+        vm.startPrank(lender);
+        t.handoverDelay = 0;
+        vm.expectRevert(CreditMatchedLiquidity.BadTerms.selector);
+        cml.listPool(pool, t);
+        t.handoverDelay = 6 hours; // a delay a normal outage outlasts
+        vm.expectRevert(CreditMatchedLiquidity.BadTerms.selector);
+        cml.listPool(pool, t);
+        t.handoverDelay = 14 days - 1;
+        vm.expectRevert(CreditMatchedLiquidity.BadTerms.selector);
+        cml.listPool(pool, t);
+        t.handoverDelay = 14 days;
+        cml.listPool(pool, t);
+        vm.stopPrank();
+        assertEq(cml.positionOf(_open()).handoverDelay, 14 days);
     }
 
     function test_handover_neverWhenNothingIsOwed() public {
@@ -944,6 +1051,9 @@ contract CreditMatchedLiquidityTest is Test {
         pm.addFees(_tokenId(id), 0, 25_250e6);
         cml.applyFees(id);
         market.set(TERMINAL, uint64(block.timestamp));
+        vm.expectRevert(CreditMatchedLiquidity.NotUnwindable.selector);
+        cml.unwind(id);
+        vm.warp(block.timestamp + GRACE); // nor once the terminal status has run its day
         vm.expectRevert(CreditMatchedLiquidity.NotUnwindable.selector);
         cml.unwind(id);
 

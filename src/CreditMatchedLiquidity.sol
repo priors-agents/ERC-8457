@@ -257,7 +257,7 @@ contract CreditMatchedLiquidity is ICreditMatchedLiquidity, IERC165 {
         if (limit > available) limit = available;
     }
 
-    function positionOf(uint256 positionId) external view returns (Position memory) {
+    function position(uint256 positionId) external view returns (Position memory) {
         return _positions[positionId];
     }
 

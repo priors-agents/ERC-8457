@@ -97,7 +97,7 @@ contract CreditMatchedLiquidityTest is Test {
     }
 
     function _tokenId(uint256 id) internal view returns (uint256) {
-        return cml.positionOf(id).tokenId;
+        return cml.position(id).tokenId;
     }
 
     function _owedInToken(uint256 id) internal view returns (uint256 owedBase, uint256 owedQuote) {
@@ -125,8 +125,8 @@ contract CreditMatchedLiquidityTest is Test {
         assertFalse(cml.supportsInterface(0xffffffff));
     }
 
-    function test_positionOf_unknownIsZero_andHealthIsZero() public view {
-        ICreditMatchedLiquidity.Position memory p = cml.positionOf(7);
+    function test_position_unknownIsZero_andHealthIsZero() public view {
+        ICreditMatchedLiquidity.Position memory p = cml.position(7);
         assertEq(p.holder, address(0));
         assertEq(uint8(p.status), uint8(ICreditMatchedLiquidity.Status.None));
         (uint256 value, uint256 owed, bool unwindable) = cml.health(7);
@@ -212,7 +212,7 @@ contract CreditMatchedLiquidityTest is Test {
         uint256 id = _open();
 
         assertEq(id, 1);
-        ICreditMatchedLiquidity.Position memory p = cml.positionOf(id);
+        ICreditMatchedLiquidity.Position memory p = cml.position(id);
         assertEq(p.holder, holder);
         assertEq(p.agentId, AGENT);
         assertEq(p.pool, pool);
@@ -257,7 +257,7 @@ contract CreditMatchedLiquidityTest is Test {
     function test_open_returnsTheBaseThePositionDidNotTake() public {
         vm.prank(holder);
         uint256 id = cml.open(pool, 200e18, 25_000e6, LOW, HIGH, AGENT); // the quote binds at the pool's price
-        assertEq(cml.positionOf(id).baseIn, 100e18);
+        assertEq(cml.position(id).baseIn, 100e18);
         assertEq(base.balanceOf(holder), 900e18);
         assertEq(base.balanceOf(address(cml)), 0);
     }
@@ -270,7 +270,7 @@ contract CreditMatchedLiquidityTest is Test {
         cml.open(pool, 100e18, 25_000e6, LOW, HIGH, AGENT);
         uint256 id = cml.open(pool, 100e18, 25_000e6, LOW, HIGH, 0); // no identity
         vm.stopPrank();
-        assertEq(cml.positionOf(id).agentId, 0);
+        assertEq(cml.position(id).agentId, 0);
     }
 
     function test_open_revertsWhenUnwindableRightAfter_poolPriceManipulated() public {
@@ -300,7 +300,7 @@ contract CreditMatchedLiquidityTest is Test {
         cml.listPool(pool, t);
         assertEq(cml.oracleOf(pool), address(other)); // for new positions
 
-        ICreditMatchedLiquidity.Position memory p = cml.positionOf(id);
+        ICreditMatchedLiquidity.Position memory p = cml.position(id);
         assertEq(p.priceFeed, address(feed));
         assertEq(p.statusSource, address(market));
         assertEq(p.unwindBps, 11_000);
@@ -326,7 +326,7 @@ contract CreditMatchedLiquidityTest is Test {
 
         assertEq(toLender, 300e6);
         assertEq(toHolder, 0);
-        assertEq(cml.positionOf(id).owed, 24_950e6);
+        assertEq(cml.position(id).owed, 24_950e6);
         assertEq(quote.balanceOf(address(cml)), lenderBefore + 300e6);
         assertEq(quote.balanceOf(holder), 0);
         (uint256 owedBase, uint256 owedQuote) = _owedInToken(id);
@@ -340,14 +340,14 @@ contract CreditMatchedLiquidityTest is Test {
         uint256 id = _open();
         pm.addFees(_tokenId(id), 0, 25_200e6);
         cml.applyFees(id);
-        assertEq(cml.positionOf(id).owed, 50e6);
+        assertEq(cml.position(id).owed, 50e6);
 
         pm.addFees(_tokenId(id), 0, 300e6);
         (uint256 toLender, uint256 toHolder) = cml.applyFees(id);
         assertEq(toLender, 50e6);
         assertEq(toHolder, 250e6);
         assertEq(quote.balanceOf(holder), 250e6);
-        assertEq(cml.positionOf(id).owed, 0);
+        assertEq(cml.position(id).owed, 0);
 
         pm.addFees(_tokenId(id), 0, 40e6);
         (toLender, toHolder) = cml.applyFees(id);
@@ -359,9 +359,9 @@ contract CreditMatchedLiquidityTest is Test {
         fee1 = bound(fee1, 0, 100_000e6); // within the mock pool's reserves
         fee2 = bound(fee2, 0, 100_000e6);
         uint256 id = _open();
-        uint256 owed0 = cml.positionOf(id).owed;
+        uint256 owed0 = cml.position(id).owed;
         vm.warp(block.timestamp + wait);
-        assertEq(cml.positionOf(id).owed, owed0); // time alone never raises it
+        assertEq(cml.position(id).owed, owed0); // time alone never raises it
 
         pm.addFees(_tokenId(id), 0, fee1);
         (uint256 l1, uint256 h1) = cml.applyFees(id);
@@ -372,7 +372,7 @@ contract CreditMatchedLiquidityTest is Test {
         uint256 toLender = fees < owed0 ? fees : owed0;
         assertEq(l1 + l2, toLender);
         assertEq(h1 + h2, fees - toLender);
-        assertEq(cml.positionOf(id).owed, owed0 - toLender);
+        assertEq(cml.position(id).owed, owed0 - toLender);
         if (h1 > 0) assertEq(l2, 0); // the holder is paid only once nothing is owed
     }
 
@@ -407,7 +407,7 @@ contract CreditMatchedLiquidityTest is Test {
         assertEq(quote.balanceOf(address(cml)), lenderBefore + 25_250e6);
         assertEq(quote.balanceOf(holder), 0);
         assertEq(pm.ownerOf(_tokenId(id)), holder); // liquidity and base fees with it
-        ICreditMatchedLiquidity.Position memory p = cml.positionOf(id);
+        ICreditMatchedLiquidity.Position memory p = cml.position(id);
         assertEq(p.owed, 0);
         assertEq(uint8(p.status), uint8(ICreditMatchedLiquidity.Status.Closed));
         (uint256 value, uint256 owed, bool unwindable) = cml.health(id);
@@ -534,7 +534,7 @@ contract CreditMatchedLiquidityTest is Test {
         assertEq(owedQuote, 0);
         assertEq(base.balanceOf(address(cml)), 0);
 
-        ICreditMatchedLiquidity.Position memory p = cml.positionOf(id);
+        ICreditMatchedLiquidity.Position memory p = cml.position(id);
         assertEq(p.owed, 0);
         assertEq(uint8(p.status), uint8(ICreditMatchedLiquidity.Status.Unwound));
         vm.expectRevert(CreditMatchedLiquidity.NotOpen.selector);
@@ -584,7 +584,7 @@ contract CreditMatchedLiquidityTest is Test {
 
     function test_unwind_pastDue_evenWhenHealthy() public {
         uint256 id = _open();
-        uint256 dueAt = cml.positionOf(id).dueAt;
+        uint256 dueAt = cml.position(id).dueAt;
         vm.warp(dueAt - 1);
         _oracle(250);
         vm.expectRevert(CreditMatchedLiquidity.NotUnwindable.selector);
@@ -604,9 +604,9 @@ contract CreditMatchedLiquidityTest is Test {
         uint256 id = _open();
         pm.addFees(_tokenId(id), 0, 25_250e6); // fees repay the loan in full
         cml.applyFees(id);
-        assertEq(cml.positionOf(id).owed, 0);
+        assertEq(cml.position(id).owed, 0);
 
-        vm.warp(cml.positionOf(id).dueAt);
+        vm.warp(cml.position(id).dueAt);
         _oracle(250);
         (,, bool unwindable) = cml.health(id);
         assertFalse(unwindable);
@@ -620,7 +620,7 @@ contract CreditMatchedLiquidityTest is Test {
         cml.close(id); // pays nothing
         assertEq(quote.balanceOf(holder), 0);
         assertEq(pm.ownerOf(_tokenId(id)), holder);
-        assertEq(uint8(cml.positionOf(id).status), uint8(ICreditMatchedLiquidity.Status.Closed));
+        assertEq(uint8(cml.position(id).status), uint8(ICreditMatchedLiquidity.Status.Closed));
     }
 
     function test_unwind_escrowAndHolderBlocked_paysTheFallback() public {
@@ -677,7 +677,7 @@ contract CreditMatchedLiquidityTest is Test {
         vm.expectRevert(CreditMatchedLiquidity.AboveQuoteLimit.selector);
         cml.open(pool, 100e18, 1, LOW, HIGH, AGENT);
 
-        vm.warp(cml.positionOf(id).dueAt); // due while the market is closed
+        vm.warp(cml.position(id).dueAt); // due while the market is closed
         _oracle(70);
         vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
         cml.unwind(id);
@@ -776,14 +776,14 @@ contract CreditMatchedLiquidityTest is Test {
         vm.prank(lender);
         cml.listPool(pool, t);
         uint256 id = _open();
-        assertEq(cml.positionOf(id).gapBps, 0);
+        assertEq(cml.position(id).gapBps, 0);
     }
 
     // ------------------------------------------------------------- hand-over
 
     function test_handover_pastDueAndDelay_whenTheFeedIsSilent() public {
         uint256 id = _open(); // the feed answers now, and never again
-        uint256 handoverAt = cml.positionOf(id).dueAt + HANDOVER;
+        uint256 handoverAt = cml.position(id).dueAt + HANDOVER;
         vm.warp(handoverAt - 1);
         vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector); // until then a dead feed blocks the unwind
         cml.unwind(id);
@@ -808,7 +808,7 @@ contract CreditMatchedLiquidityTest is Test {
         assertEq(base.balanceOf(fallbackAddr), 0);
         assertEq(base.balanceOf(address(cml)), 0);
 
-        ICreditMatchedLiquidity.Position memory p = cml.positionOf(id);
+        ICreditMatchedLiquidity.Position memory p = cml.position(id);
         assertEq(p.owed, 0);
         assertEq(uint8(p.status), uint8(ICreditMatchedLiquidity.Status.HandedOver));
         (uint256 value, uint256 owed, bool unwindable) = cml.health(id);
@@ -826,7 +826,7 @@ contract CreditMatchedLiquidityTest is Test {
     function test_handover_aFeedThatIsLateIsNotSilent_oneThatAnswersNothingUsableIs() public {
         uint256 late = _open();
         uint256 broken = _open();
-        uint256 handoverAt = cml.positionOf(late).dueAt + HANDOVER;
+        uint256 handoverAt = cml.position(late).dueAt + HANDOVER;
         vm.warp(handoverAt - 2 days);
         _oracle(250); // two days old at the hand-over time: too old to use, too recent for a dead feed
         uint256 lastAnswer = block.timestamp;
@@ -855,7 +855,7 @@ contract CreditMatchedLiquidityTest is Test {
 
     function test_handover_neverOnASessionBreak_thenTheReopeningPriceIsAwaited() public {
         uint256 id = _open();
-        uint256 handoverAt = cml.positionOf(id).dueAt + HANDOVER;
+        uint256 handoverAt = cml.position(id).dueAt + HANDOVER;
         vm.warp(handoverAt - 1 days);
         _oracle(250); // Friday's last price
         market.set(BREAK, uint64(block.timestamp)); // a break that runs past the hand-over time
@@ -882,7 +882,7 @@ contract CreditMatchedLiquidityTest is Test {
         uint256 id = _open();
         uint64 stopped = uint64(block.timestamp + 1 hours);
         market.set(BREAK, stopped); // a source that reports a break for weeks
-        vm.warp(cml.positionOf(id).dueAt + HANDOVER + 1 days); // the feed silent for weeks too
+        vm.warp(cml.position(id).dueAt + HANDOVER + 1 days); // the feed silent for weeks too
         vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
         cml.unwind(id);
 
@@ -896,7 +896,7 @@ contract CreditMatchedLiquidityTest is Test {
 
     function test_handover_aHaltMustHaveLastedTheDelay() public {
         uint256 id = _open();
-        uint256 handoverAt = cml.positionOf(id).dueAt + HANDOVER;
+        uint256 handoverAt = cml.position(id).dueAt + HANDOVER;
         vm.warp(handoverAt - 1 hours);
         uint64 haltedAt = uint64(block.timestamp);
         market.set(HALTED, haltedAt); // halted an hour before the hand-over time
@@ -948,7 +948,7 @@ contract CreditMatchedLiquidityTest is Test {
         assertEq(pm.ownerOf(_tokenId(id)), fallbackAddr);
         (uint256 owedBase,) = _owedInToken(id);
         assertApproxEqRel(owedBase, 100e18, TOL);
-        assertLt(block.timestamp, cml.positionOf(id).dueAt);
+        assertLt(block.timestamp, cml.position(id).dueAt);
     }
 
     function test_terminal_theHolderClosesInsideTheDay_andKeepsItsPart() public {
@@ -972,7 +972,7 @@ contract CreditMatchedLiquidityTest is Test {
         assertEq(pm.ownerOf(_tokenId(id)), holder);
         (,,, uint128 left,,) = pm.positions(_tokenId(id));
         assertEq(left, liquidity); // all of it, the holder's 100 base included
-        assertEq(uint8(cml.positionOf(id).status), uint8(ICreditMatchedLiquidity.Status.Closed));
+        assertEq(uint8(cml.position(id).status), uint8(ICreditMatchedLiquidity.Status.Closed));
 
         vm.warp(since + GRACE);
         vm.expectRevert(CreditMatchedLiquidity.NotOpen.selector);
@@ -1005,7 +1005,7 @@ contract CreditMatchedLiquidityTest is Test {
     function test_handover_terminal_doesNotDelayAHandoverAlreadyDue() public {
         uint256 first = _open(); // the feed answers now, and then nothing until the hand-over time
         uint256 second = _open();
-        vm.warp(cml.positionOf(first).dueAt + HANDOVER);
+        vm.warp(cml.position(first).dueAt + HANDOVER);
         uint64 since = uint64(block.timestamp);
         market.set(TERMINAL, since); // terminal from now, past the due date and the delay
         vm.recordLogs();
@@ -1043,7 +1043,7 @@ contract CreditMatchedLiquidityTest is Test {
         t.handoverDelay = 14 days;
         cml.listPool(pool, t);
         vm.stopPrank();
-        assertEq(cml.positionOf(_open()).handoverDelay, 14 days);
+        assertEq(cml.position(_open()).handoverDelay, 14 days);
     }
 
     function test_handover_neverWhenNothingIsOwed() public {
@@ -1058,20 +1058,20 @@ contract CreditMatchedLiquidityTest is Test {
         cml.unwind(id);
 
         market.set(TRADING, uint64(block.timestamp));
-        vm.warp(cml.positionOf(id).dueAt + HANDOVER + 1 days); // the feed silent for longer than the delay
+        vm.warp(cml.position(id).dueAt + HANDOVER + 1 days); // the feed silent for longer than the delay
         vm.expectRevert(CreditMatchedLiquidity.NotUnwindable.selector);
         cml.unwind(id);
 
         vm.prank(holder);
         cml.close(id);
         assertEq(pm.ownerOf(_tokenId(id)), holder);
-        assertEq(uint8(cml.positionOf(id).status), uint8(ICreditMatchedLiquidity.Status.Closed));
+        assertEq(uint8(cml.position(id).status), uint8(ICreditMatchedLiquidity.Status.Closed));
     }
 
     function test_handover_aStatusSourceThatCannotAnswer_countsAsUnknown() public {
         uint256 down = _open();
         uint256 garbled = _open();
-        uint256 handoverAt = cml.positionOf(down).dueAt + HANDOVER;
+        uint256 handoverAt = cml.position(down).dueAt + HANDOVER;
         market.setDown(true);
         vm.warp(handoverAt - 1); // the feed silent since the opening, but not yet the hand-over time
         vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
@@ -1102,7 +1102,7 @@ contract CreditMatchedLiquidityTest is Test {
 
     function test_handover_aStatusSourceThatFailsOnce_handsNothingOver() public {
         uint256 id = _open();
-        vm.warp(cml.positionOf(id).dueAt + HANDOVER + 1);
+        vm.warp(cml.position(id).dueAt + HANDOVER + 1);
         _oracle(250); // the feed answers a fresh price
         market.setDown(true); // the status source fails for one call, well past the hand-over time
         vm.expectRevert(CreditMatchedLiquidity.PriceUnusable.selector);
@@ -1130,7 +1130,7 @@ contract CreditMatchedLiquidityTest is Test {
         vm.expectRevert(abi.encodeWithSelector(CreditMatchedLiquidity.ShortPayment.selector, 24_997.5e6, 25_250e6));
         cml.close(id);
         assertEq(pm.ownerOf(_tokenId(id)), address(cml)); // the position stays in escrow
-        assertEq(cml.positionOf(id).owed, 25_250e6);
+        assertEq(cml.position(id).owed, 25_250e6);
     }
 
     function test_feeChargingQuote_applyFeesCountsWhatArrived() public {
@@ -1142,12 +1142,12 @@ contract CreditMatchedLiquidityTest is Test {
         assertEq(toLender, 297e6); // 300 collected, 297 arrived
         assertEq(quote.balanceOf(address(cml)) - lenderBefore, 297e6);
         assertEq(toHolder, 0);
-        assertEq(cml.positionOf(id).owed, 25_250e6 - 297e6);
+        assertEq(cml.position(id).owed, 25_250e6 - 297e6);
 
         quote.setFeeBps(0);
         pm.addFees(_tokenId(id), 0, 24_953e6); // pays off the rest
         cml.applyFees(id);
-        assertEq(cml.positionOf(id).owed, 0);
+        assertEq(cml.position(id).owed, 0);
         quote.setFeeBps(100);
         pm.addFees(_tokenId(id), 0, 300e6);
         (toLender, toHolder) = cml.applyFees(id);
@@ -1182,9 +1182,9 @@ contract CreditMatchedLiquidityTest is Test {
         _poolPrice(256);
         vm.prank(holder);
         uint256 id = cml.open(pool, 100e18, 25_600e6, LOW, HIGH, AGENT);
-        assertEq(cml.positionOf(id).owed, 25_856e6);
+        assertEq(cml.position(id).owed, 25_856e6);
 
-        vm.warp(cml.positionOf(id).dueAt);
+        vm.warp(cml.position(id).dueAt);
         _oracle(255); // due, settled at 255 while the pool still says 256
         vm.recordLogs();
         cml.unwind(id);
@@ -1261,7 +1261,7 @@ contract CreditMatchedLiquidityTest is Test {
                     Kit memory k = _kit(bd, qd, fd);
                     assertEq(k.cml.quoteLimit(k.pool, 100 * b), 25_000 * q, "quoteLimit");
                     uint256 id = _kitOpen(k, bd, qd);
-                    assertEq(k.cml.positionOf(id).owed, 25_250 * q, "owed");
+                    assertEq(k.cml.position(id).owed, 25_250 * q, "owed");
                     (uint256 value,,) = k.cml.health(id);
                     assertApproxEqRel(value, 50_000 * q, TOL, "value");
 
@@ -1285,7 +1285,7 @@ contract CreditMatchedLiquidityTest is Test {
                     Kit memory k = _kit(bd, qd, fd);
                     uint256 id = _kitOpen(k, bd, qd);
                     // 1,000 base owed to the position token, as a range below the price would hold.
-                    k.pm.addFees(k.cml.positionOf(id).tokenId, 1_000 * 10 ** uint256(bd), 0);
+                    k.pm.addFees(k.cml.position(id).tokenId, 1_000 * 10 ** uint256(bd), 0);
                     k.feed.set(type(int128).max, block.timestamp);
 
                     // Either an answer or a clean refusal, never an arithmetic panic.
@@ -1295,10 +1295,10 @@ contract CreditMatchedLiquidityTest is Test {
                     } catch (bytes memory err) {
                         assertEq(err, abi.encodeWithSelector(CreditMatchedLiquidity.PriceUnusable.selector), "health");
                     }
-                    vm.warp(k.cml.positionOf(id).dueAt);
+                    vm.warp(k.cml.position(id).dueAt);
                     k.feed.set(type(int128).max, block.timestamp);
                     try k.cml.unwind(id) {
-                        assertEq(uint8(k.cml.positionOf(id).status), uint8(ICreditMatchedLiquidity.Status.Unwound));
+                        assertEq(uint8(k.cml.position(id).status), uint8(ICreditMatchedLiquidity.Status.Unwound));
                     } catch (bytes memory err) {
                         assertEq(err, abi.encodeWithSelector(CreditMatchedLiquidity.PriceUnusable.selector), "unwind");
                     }
@@ -1318,7 +1318,7 @@ contract CreditMatchedLiquidityTest is Test {
                     Kit memory k = _kit(bd, qd, fd);
                     uint256 id = _kitOpen(k, bd, qd);
                     // 2**100 base owed to the position token: amounts up to 2**128 are what the bounds are sized for.
-                    k.pm.addFees(k.cml.positionOf(id).tokenId, uint256(1) << 100, 0);
+                    k.pm.addFees(k.cml.position(id).tokenId, uint256(1) << 100, 0);
 
                     // The largest answer whose price, quote units per 1e18 base units, is at most MAX_PRICE.
                     uint256 up = 10 ** (18 + uint256(qd));
@@ -1341,7 +1341,7 @@ contract CreditMatchedLiquidityTest is Test {
                         assertEq(k.cml.quoteLimit(k.pool, 100 * 10 ** uint256(bd)), 0);
                     }
 
-                    vm.warp(k.cml.positionOf(id).dueAt);
+                    vm.warp(k.cml.position(id).dueAt);
                     // forge-lint: disable-next-line(unsafe-typecast)
                     k.feed.set(int256(largest), block.timestamp);
                     vm.recordLogs();

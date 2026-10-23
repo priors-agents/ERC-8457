@@ -136,7 +136,7 @@ interface ICreditMatchedLiquidity {
     function oracleOf(address pool) external view returns (address priceFeed);
     function quoteLimit(address pool, uint256 baseIn) external view returns (uint256);
     function open(address pool, uint256 baseIn, uint256 quoteToBorrow, int24 tickLower, int24 tickUpper, uint256 agentId) external returns (uint256 positionId);
-    function positionOf(uint256 positionId) external view returns (Position memory);
+    function position(uint256 positionId) external view returns (Position memory);
     function health(uint256 positionId) external view returns (uint256 valueInQuote, uint256 owed, bool unwindable);
     function applyFees(uint256 positionId) external returns (uint256 toLender, uint256 toHolder);
     function close(uint256 positionId) external;
@@ -205,7 +205,7 @@ interface ICreditMatchedLiquidity {
   collect from it or transfer it, except as `applyFees`, `close` and `unwind` define.
 - A position's `priceFeed`, `statusSource`, `maxPriceAge`, `unwindBps`, `gapBps`, `dueAt` and `handoverDelay` MUST NOT
   change. Its `owed` MUST NOT increase after it is opened.
-- `positionOf(positionId)` MUST return the position as recorded, with its current `owed` and `status`, and a
+- `position(positionId)` MUST return the position as recorded, with its current `owed` and `status`, and a
   zero-valued record with status `None` for an id never issued.
 
 ### Health

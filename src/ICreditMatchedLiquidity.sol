@@ -79,7 +79,7 @@ interface ICreditMatchedLiquidity {
     ) external returns (uint256 positionId);
 
     /// @notice The position `positionId`, zero-valued with status None when it was never opened.
-    function positionOf(uint256 positionId) external view returns (Position memory);
+    function position(uint256 positionId) external view returns (Position memory);
 
     /// @notice The position's value at the feed's price, what it owes, and whether anyone may unwind it now.
     function health(uint256 positionId) external view returns (uint256 valueInQuote, uint256 owed, bool unwindable);

@@ -11,16 +11,16 @@ once it is due. A price set while the stock's market was closed is never used, a
 cannot strand a position: the lender's share goes to a fallback address it names, and the holder's share waits in the
 position token.
 
-**Status: draft, not submitted.** The text is in
+**Status: draft, submitted as [ethereum/ERCs#2109](https://github.com/ethereum/ERCs/pull/2109).** The text is in
 [`ERCS/erc-draft_credit_matched_liquidity.md`](ERCS/erc-draft_credit_matched_liquidity.md). Its `eip: 99908` is a
-placeholder: the ERC editors assign the real number when the pull request is opened on ethereum/ERCs. Discussion:
-[Ethereum Magicians](https://ethereum-magicians.org/t/erc-tba-credit-matched-liquidity/30039). The second revision
-(2026-10-21) takes in the review there by Zealynx: a timed hand-over to the lender when no price comes past the due
-date, a trading status that tells a session break from a halt and from a delisting or a redemption, and a fix so that
-a position whose fees repaid it in full is never unwound. The third revision (2026-10-22) takes in Zealynx's follow-up
-there: the 14-day floor on the hand-over delay is a MUST, as the reference already enforced, and a terminal status
-hands a position over only a day (`TERMINAL_GRACE`) after the `since` its source reports, so that a holder who is
-watching can still close, which needs no price, and keep its part.
+placeholder until the ERC editors assign a number. Discussion: [Ethereum
+Magicians](https://ethereum-magicians.org/t/erc-tba-credit-matched-liquidity/30039). The second revision (2026-10-21)
+takes in the review there by Zealynx: a timed hand-over to the lender when no price comes past the due date, a trading
+status that tells a session break from a halt and from a delisting or a redemption, and a fix so that a position whose
+fees repaid it in full is never unwound. The third revision (2026-10-22) takes in Zealynx's follow-up there: the 14-day
+floor on the hand-over delay is a MUST, as the reference already enforced, and a terminal status hands a position over
+only a day (`TERMINAL_GRACE`) after the `since` its source reports, so that a holder who is watching can still close,
+which needs no price, and keep its part.
 
 ## Why
 
